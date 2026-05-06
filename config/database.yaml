@@ -1,0 +1,16 @@
+# ==============================================================
+# PUCP Cloud Orchestrator - Database Configuration
+# Motor: MariaDB
+# ==============================================================
+
+database:
+  host: "localhost"
+  port: 3306
+  user: "orchestrator"
+  password: "PucpCloud2026!"
+  database: "pucp_orchestrator"
+
+connection:
+  pool_size: 10
+  max_overflow: 20
+  echo: false

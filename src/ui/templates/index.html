@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PUCP Cloud Orchestrator - Grupo 2</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="header">
+        <div>
+            <h1>☁ PUCP Cloud Orchestrator</h1>
+            <span style="color:#8ab4d8;font-size:13px;">Private Cloud Orchestrator - Grupo 2</span>
+        </div>
+        <div>
+            <span class="badge">FASE 1</span>
+            <span class="badge" style="margin-left:8px;">Linux Cluster</span>
+        </div>
+    </div>
+
+    <div class="container">
+        {% if message %}
+        <div class="alert {{ message_type }}">{{ message }}</div>
+        {% endif %}
+
+        <div class="grid-2">
+            <!-- CREATE SLICE -->
+            <div class="card">
+                <h2>🆕 Crear Nuevo Slice</h2>
+                <form method="POST" action="/create">
+                    <div class="form-group">
+                        <label>Nombre del Slice</label>
+                        <input type="text" name="name" placeholder="Ej: lab-redes-01" required>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Topología</label>
+                            <select name="topology" id="topology" onchange="updatePreview()">
+                                <option value="lineal">Lineal</option>
+                                <option value="anillo">Anillo</option>
+                                <option value="malla">Malla</option>
+                                <option value="arbol">Árbol</option>
+                                <option value="bus">Bus</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Número de VMs</label>
+                            <input type="number" name="num_vms" id="num_vms" value="4" min="2" max="10" onchange="updatePreview()">
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>vCPUs por VM</label>
+                            <input type="number" name="vcpus" value="1" min="1" max="8">
+                        </div>
+                        <div class="form-group">
+                            <label>RAM por VM (MB)</label>
+                            <input type="number" name="ram_mb" value="512" min="128" max="8192" step="128">
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Disco por VM (GB)</label>
+                            <input type="number" name="disk_gb" value="2" min="1" max="50">
+                        </div>
+                        <div class="form-group">
+                            <label>VLAN ID</label>
+                            <input type="number" name="vlan_id" value="300" min="1" max="4094">
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Subred</label>
+                        <input type="text" name="subnet" value="10.60.3.0/24" placeholder="Ej: 10.60.3.0/24">
+                    </div>
+
+                    <div class="checkbox-group">
+                        <input type="checkbox" name="enable_dhcp" id="enable_dhcp">
+                        <label for="enable_dhcp">Habilitar DHCP</label>
+                    </div>
+
+                    <div class="checkbox-group">
+                        <input type="checkbox" name="enable_internet" id="enable_internet">
+                        <label for="enable_internet">Habilitar salida a Internet</label>
+                    </div>
+
+                    <button type="submit" class="btn btn-primary btn-full">Crear Slice</button>
+                </form>
+            </div>
+
+            <!-- TOPOLOGY PREVIEW + HOSTS -->
+            <div>
+                <div class="card">
+                    <h2>🔍 Vista previa: <span id="topo-name">Lineal</span></h2>
+                    <div class="topology-preview" id="topology-preview">
+                        VM1 --- VM2 --- VM3 --- VM4
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h2>🖥 Estado de Servidores</h2>
+                    <div class="host-grid">
+                        {% for host in hosts %}
+                        <div class="host-card">
+                            <h4>{{ host.hostname }}</h4>
+                            <small>IP: {{ host.ip }}</small>
+                            <div style="margin-top:8px;">
+                                <small>CPU: {{ host.total_vcpus - host.available_vcpus }}/{{ host.total_vcpus }} vCPUs</small>
+                                <div class="resource-bar">
+                                    <div class="resource-fill {{ 'warn' if host.usage_pct > 60 else '' }} {{ 'danger' if host.usage_pct > 85 else '' }}"
+                                         style="width:{{ host.usage_pct }}%;"></div>
+                                </div>
+                                <small>RAM: {{ host.total_ram_mb - host.available_ram_mb }}/{{ host.total_ram_mb }} MB</small>
+                                <div class="resource-bar">
+                                    <div class="resource-fill {{ 'warn' if (host.total_ram_mb - host.available_ram_mb) / host.total_ram_mb * 100 > 60 else '' }}"
+                                         style="width:{{ (host.total_ram_mb - host.available_ram_mb) / host.total_ram_mb * 100 }}%;"></div>
+                                </div>
+                                <small>VMs activas: {{ host.available_vcpus is not none and (host.total_vcpus - host.available_vcpus) or 0 }}</small>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- EXISTING SLICES -->
+        <div class="card">
+            <h2>📋 Slices Existentes</h2>
+            {% if slices %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Nombre</th>
+                        <th>Topología</th>
+                        <th>VMs</th>
+                        <th>vCPU/VM</th>
+                        <th>RAM/VM</th>
+                        <th>Estado</th>
+                        <th>Creado</th>
+                        <th>Acciones</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for s in slices %}
+                    <tr>
+                        <td><strong>{{ s.name }}</strong></td>
+                        <td>{{ s.topology | capitalize }}</td>
+                        <td>{{ s.num_vms }}</td>
+                        <td>{{ s.vcpus_per_vm }}</td>
+                        <td>{{ s.ram_mb_per_vm }}MB</td>
+                        <td class="status-{{ s.status }}">● {{ s.status }}</td>
+                        <td style="font-size:11px;">{{ s.created_at[:16] }}</td>
+                        <td>
+                            <a href="/slice/{{ s.id }}" class="btn btn-sm btn-primary">Ver</a>
+                            <a href="/delete/{{ s.id }}" class="btn btn-sm btn-danger" onclick="return confirm('¿Eliminar slice {{ s.name }}?')">Borrar</a>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p style="color:#8ab4d8;text-align:center;padding:20px;">No hay slices creados aún.</p>
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="footer">
+        PUCP Private Cloud Orchestrator - TEL141 Ingeniería de Redes Cloud 2026-1 - Grupo 2
+    </div>
+
+    <script>
+        function updatePreview() {
+            const topo = document.getElementById('topology').value;
+            const n = parseInt(document.getElementById('num_vms').value) || 4;
+            let preview = '';
+            const nameSpan = document.getElementById('topo-name');
+
+            if (topo === 'lineal') {
+                nameSpan.textContent = 'Lineal';
+                for (let i = 1; i <= n; i++) {
+                    preview += 'VM' + i;
+                    if (i < n) preview += ' --- ';
+                }
+            } else if (topo === 'anillo') {
+                nameSpan.textContent = 'Anillo';
+                preview += '  VM1';
+                for (let i = 2; i <= n; i++) preview += ' --- VM' + i;
+                preview += '\n   |' + ' '.repeat((n-1)*8) + '|\n   +' + '-'.repeat((n-1)*8) + '+';
+            } else if (topo === 'malla') {
+                nameSpan.textContent = 'Malla';
+                preview = 'Todos contra todos (' + (n*(n-1)/2) + ' enlaces)';
+            } else if (topo === 'arbol') {
+                nameSpan.textContent = 'Árbol';
+                preview = 'Árbol binario con ' + n + ' nodos';
+            } else if (topo === 'bus') {
+                nameSpan.textContent = 'Bus';
+                for (let i = 2; i <= n; i++) preview += 'VM1 --- VM' + i + '\n';
+            }
+
+            document.getElementById('topology-preview').textContent = preview;
+        }
+    </script>
+</body>
+</html>

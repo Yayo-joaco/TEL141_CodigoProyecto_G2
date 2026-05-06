@@ -1,0 +1,25 @@
+# ==============================================================
+# PUCP Cloud Orchestrator - Network Configuration
+# Grupo: G2
+# Rango asignado: 10.60.3.0/24 (Linux Cluster)
+# ==============================================================
+
+network:
+  vlan_id: 300
+  subnet: "10.60.3.0/24"
+  gateway: "10.60.3.1"
+  dns: "8.8.8.8"
+
+  dhcp:
+    enabled: false
+    start_ip: "10.60.3.100"
+    end_ip: "10.60.3.200"
+    lease_time: "12h"
+
+ovs:
+  bridge_name: "br-int"
+  trunk_port: "eth1"
+
+internet:
+  enabled: false
+  nat_interface: "eth0"

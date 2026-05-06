@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Slice {{ slice.name }} - PUCP Cloud Orchestrator</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="header">
+        <div>
+            <h1>☁ Detalle del Slice</h1>
+            <span style="color:#8ab4d8;font-size:13px;">
+                <a href="/" style="color:#4db8ff;">← Volver</a>
+            </span>
+        </div>
+        <div>
+            <span class="badge">FASE 1</span>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="card">
+            <h2>{{ slice.name }}</h2>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:14px;">
+                <div>
+                    <strong>ID:</strong> {{ slice.id }}<br>
+                    <strong>Topología:</strong> {{ slice.topology | capitalize }}<br>
+                    <strong>VMs:</strong> {{ slice.num_vms }}<br>
+                    <strong>VLAN:</strong> {{ slice.vlan_id }}<br>
+                    <strong>Subred:</strong> {{ slice.subnet }}
+                </div>
+                <div>
+                    <strong>Estado:</strong> <span class="status-{{ slice.status }}">{{ slice.status }}</span><br>
+                    <strong>vCPU/VM:</strong> {{ slice.vcpus_per_vm }}<br>
+                    <strong>RAM/VM:</strong> {{ slice.ram_mb_per_vm }}MB<br>
+                    <strong>Disco/VM:</strong> {{ slice.disk_gb_per_vm }}GB<br>
+                    <strong>DHCP:</strong> {{ 'Sí' if slice.enable_dhcp else 'No' }}<br>
+                    <strong>Internet:</strong> {{ 'Sí' if slice.enable_internet else 'No' }}
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>💻 Máquinas Virtuales</h2>
+            {% if vms %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Nombre</th>
+                        <th>Host</th>
+                        <th>vCPUs</th>
+                        <th>RAM</th>
+                        <th>Estado</th>
+                        <th>MAC</th>
+                        <th>VNC Port</th>
+                        <th>Token Consola</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for vm in vms %}
+                    <tr>
+                        <td><strong>{{ vm.name }}</strong></td>
+                        <td>{{ vm.host_ip or '—' }}</td>
+                        <td>{{ vm.vcpus }}</td>
+                        <td>{{ vm.ram_mb }}MB</td>
+                        <td class="status-{{ vm.status }}">● {{ vm.status }}</td>
+                        <td style="font-family:monospace;font-size:11px;">{{ vm.mac_address or '—' }}</td>
+                        <td>{{ vm.vnc_port or '—' }}</td>
+                        <td>
+                            {% if vm.vnc_token %}
+                            <span style="font-family:monospace;font-size:10px;word-break:break-all;">{{ vm.vnc_token }}</span>
+                            {% else %}
+                            —
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p style="color:#8ab4d8;text-align:center;">No hay VMs registradas.</p>
+            {% endif %}
+        </div>
+
+        <div class="card">
+            <h2>📝 Logs del Slice</h2>
+            {% if logs %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Timestamp</th>
+                        <th>Módulo</th>
+                        <th>Nivel</th>
+                        <th>Mensaje</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for log in logs %}
+                    <tr>
+                        <td style="font-size:11px;">{{ log.created_at[:19] }}</td>
+                        <td>{{ log.module }}</td>
+                        <td>{{ log.level }}</td>
+                        <td>{{ log.message }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p style="color:#8ab4d8;text-align:center;">No hay logs registrados.</p>
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="footer">
+        PUCP Private Cloud Orchestrator - TEL141 Ingeniería de Redes Cloud 2026-1 - Grupo 2
+    </div>
+</body>
+</html>

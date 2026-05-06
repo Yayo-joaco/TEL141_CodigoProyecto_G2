@@ -1,0 +1,48 @@
+# ==============================================================
+# PUCP Cloud Orchestrator - Hosts Configuration
+# Grupo: G2
+# Fase: 1 - Linux Cluster
+# ==============================================================
+
+headnode:
+  hostname: server1
+  ip: "10.0.10.1"
+  port: 22
+  user: "ubuntu"
+  role: "orchestrator"
+
+workers:
+  - hostname: server2
+    ip: "10.0.10.2"
+    port: 22
+    user: "ubuntu"
+    role: "compute"
+
+  - hostname: server3
+    ip: "10.0.10.3"
+    port: 22
+    user: "ubuntu"
+    role: "compute"
+
+  - hostname: server4
+    ip: "10.0.10.4"
+    port: 22
+    user: "ubuntu"
+    role: "compute"
+
+gateway:
+  ip: "10.20.12.246"
+
+ssh:
+  key_path: "/home/ubuntu/.ssh/id_rsa"
+  timeout: 30
+  sudo: true
+
+vm_resources:
+  default_vcpus: 1
+  default_ram_mb: 512
+  default_disk_gb: 2
+
+base_image:
+  path: "/home/ubuntu/cirros-base.img"
+  format: "qcow2"
