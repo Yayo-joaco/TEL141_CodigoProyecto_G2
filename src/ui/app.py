@@ -507,7 +507,12 @@ def ws_proxy(vm_id):
     app.logger.info("WS Proxy START: %s (%s) -> %s", vm.name, vm_id, target_url)
 
     try:
-        remote = ws_client.create_connection(target_url, timeout=10)
+        subprotocols = request.environ.get('HTTP_SEC_WEBSOCKET_PROTOCOL', '')
+        sub_list = [s.strip() for s in subprotocols.split(',')] if subprotocols else []
+        if not sub_list:
+            sub_list = ['binary', 'base64']
+        remote = ws_client.create_connection(
+            target_url, timeout=10, subprotocols=sub_list)
     except Exception as e:
         app.logger.error("WS Proxy cannot reach worker %s: %s", target_url, e)
         try:
