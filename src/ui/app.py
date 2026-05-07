@@ -303,6 +303,13 @@ def delete_slice(slice_id):
 def refresh_hosts():
     orch = get_orchestrator()
     result = orch.refresh_hosts()
+
+    for host in orch.hosts:
+        vms = orch.db.get_vms_by_host(host.ip)
+        active = [v for v in vms if v.status.value == 'active']
+        host.vms_running = len(active)
+        orch.db.save_host(host)
+
     flash(f"Hosts actualizados: {result['refreshed']} OK, {len(result.get('failed',[]))} fallaron", "success")
     return redirect(url_for("index"))
 

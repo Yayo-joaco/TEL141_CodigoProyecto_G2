@@ -210,6 +210,12 @@ class Orchestrator:
         if db_hosts:
             self.hosts[:] = db_hosts
             self.placement_engine.hosts = self.hosts
+
+            for host in self.hosts:
+                vms = self.db.get_vms_by_host(host.ip)
+                active = [v for v in vms if v.status.value == 'active']
+                host.vms_running = len(active)
+                self.db.save_host(host)
         return {"refreshed": updated, "failed": failed}
 
     def get_logs(self, slice_id: str, user: User = None) -> List[dict]:

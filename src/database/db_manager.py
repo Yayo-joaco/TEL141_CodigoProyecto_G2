@@ -198,6 +198,7 @@ class HostRecord(Base):
     available_ram_mb = Column(Integer, default=8192)
     available_disk_gb = Column(Integer, default=100)
     is_active = Column(Integer, default=1)
+    vms_running = Column(Integer, default=0)
 
     def to_host(self) -> Host:
         return Host(
@@ -211,6 +212,7 @@ class HostRecord(Base):
             available_ram_mb=self.available_ram_mb,
             available_disk_gb=self.available_disk_gb,
             is_active=bool(self.is_active),
+            vms_running=self.vms_running or 0,
         )
 
 
@@ -461,6 +463,14 @@ class DatabaseManager:
         finally:
             session.close()
 
+    def get_vms_by_host(self, host_ip: str) -> List[VM]:
+        session = self.get_session()
+        try:
+            records = session.query(VMRecord).filter_by(host_ip=host_ip).all()
+            return [r.to_vm() for r in records]
+        finally:
+            session.close()
+
     def delete_vm_record(self, vm_id: str):
         session = self.get_session()
         try:
@@ -482,6 +492,7 @@ class DatabaseManager:
                 record.available_ram_mb = host.available_ram_mb
                 record.available_disk_gb = host.available_disk_gb
                 record.is_active = int(host.is_active)
+                record.vms_running = host.vms_running
             else:
                 record = HostRecord(
                     hostname=host.hostname,
@@ -494,6 +505,7 @@ class DatabaseManager:
                     available_ram_mb=host.available_ram_mb,
                     available_disk_gb=host.available_disk_gb,
                     is_active=int(host.is_active),
+                    vms_running=host.vms_running,
                 )
                 session.add(record)
             session.commit()
