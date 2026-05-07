@@ -53,7 +53,7 @@
         <div id="noVNC_screen">
             <div id="noVNC_placeholder"
                  style="padding:40px;text-align:center;color:#4db8ff;font-family:monospace;font-size:14px;">
-                Conectando a {{ vm.host_ip }}:{{ vm.vnc_ws_port }}...
+                Conectando via proxy a {{ vm.host_ip }}:{{ vm.vnc_ws_port }}...
             </div>
         </div>
     </div>
@@ -70,7 +70,8 @@
 
     <script>
     (function() {
-        var wsUrl = 'ws://{{ vm.host_ip }}:{{ vm.vnc_ws_port }}';
+        var wsUrl = 'ws://' + window.location.host + '/ws-proxy/{{ vm.id }}';
+        var directUrl = 'ws://{{ vm.host_ip }}:{{ vm.vnc_ws_port }}';
         var placeholder = document.getElementById('noVNC_placeholder');
         var screenEl = document.getElementById('noVNC_screen');
         var badge = document.getElementById('status-badge');
@@ -96,7 +97,7 @@
         }
 
         function connectVNC() {
-            updateStatus('connecting', 'Conectando a ' + wsUrl + '...');
+            updateStatus('connecting', 'Conectando via proxy...');
 
             rfb = new RFB(screenEl, wsUrl, {
                 credentials: { password: '' },
@@ -109,7 +110,7 @@
             });
 
             rfb.addEventListener('connect', function() {
-                updateStatus('connected', 'Conectado a ' + wsUrl);
+                updateStatus('connected', 'Conectado a ' + '{{ vm.name }}');
                 if (placeholder) placeholder.style.display = 'none';
                 rfb.focus();
             });

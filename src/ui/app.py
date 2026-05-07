@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 import uuid
+import threading
 from functools import wraps
 from pathlib import Path
 
@@ -16,6 +17,13 @@ from flask import (
     jsonify, make_response, session, flash, send_file,
 )
 from werkzeug.security import generate_password_hash, check_password_hash
+
+from gevent import monkey; monkey.patch_all()
+import gevent
+from gevent.pywsgi import WSGIServer
+from geventwebsocket.handler import WebSocketHandler
+from geventwebsocket import WebSocketError
+import websocket as ws_client
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
@@ -479,8 +487,88 @@ def admin_sessions():
 
 
 # =============================================================
+# WebSocket Proxy for VNC Console
+# =============================================================
+
+@app.route('/ws-proxy/<vm_id>')
+def ws_proxy(vm_id):
+    ws = request.environ.get('wsgi.websocket')
+    if not ws:
+        return jsonify({"error": "WebSocket connection required"}), 400
+    orch = get_orchestrator()
+    vm = orch.db.get_vm_by_id(vm_id)
+    if not vm:
+        return jsonify({"error": "VM not found"}), 404
+    if not vm.host_ip or not vm.vnc_ws_port:
+        return jsonify({"error": "VM not ready"}), 503
+
+    worker_url = f"ws://{vm.host_ip}:{vm.vnc_ws_port}"
+    logger = logging.getLogger("ws-proxy")
+    logger.info("Proxy: %s -> %s", vm_id, worker_url)
+
+    worker_ws = None
+    try:
+        worker_ws = ws_client.create_connection(worker_url, timeout=10)
+    except Exception as e:
+        logger.error("Cannot connect to worker %s: %s", worker_url, e)
+        try:
+            ws.send(f"ERROR: Cannot reach VM at {worker_url}")
+            ws.close()
+        except Exception:
+            pass
+        return ""
+
+    running = {"value": True}
+
+    def browser_to_worker():
+        try:
+            while running["value"]:
+                msg = ws.receive()
+                if msg is None:
+                    break
+                worker_ws.send_binary(msg) if isinstance(msg, bytes) else worker_ws.send(msg)
+        except WebSocketError:
+            pass
+        except Exception as e:
+            logger.debug("browser->worker closed: %s", e)
+        finally:
+            running["value"] = False
+
+    def worker_to_browser():
+        try:
+            while running["value"]:
+                msg = worker_ws.recv()
+                if msg is None:
+                    break
+                ws.send(msg)
+        except ws_client.WebSocketConnectionClosedException:
+            pass
+        except Exception as e:
+            logger.debug("worker->browser closed: %s", e)
+        finally:
+            running["value"] = False
+
+    g1 = gevent.spawn(browser_to_worker)
+    g2 = gevent.spawn(worker_to_browser)
+    gevent.joinall([g1, g2], timeout=300)
+
+    try:
+        worker_ws.close()
+    except Exception:
+        pass
+    try:
+        ws.close()
+    except Exception:
+        pass
+    logger.info("Proxy closed: %s", vm_id)
+    return ""
+
+
+# =============================================================
 # Run
 # =============================================================
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080, debug=False)
+    http_server = WSGIServer(('0.0.0.0', 8080), app, handler_class=WebSocketHandler)
+    print("PUCP Cloud Orchestrator running on http://0.0.0.0:8080")
+    http_server.serve_forever()
