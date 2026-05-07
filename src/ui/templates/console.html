@@ -102,11 +102,7 @@
             rfb = new RFB(screenEl, wsUrl, {
                 credentials: { password: '' },
                 shared: true,
-                viewOnly: false,
                 scaleViewport: true,
-                resizeSession: false,
-                qualityLevel: 6,
-                compressionLevel: 2,
             });
 
             rfb.addEventListener('connect', function() {
