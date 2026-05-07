@@ -58,7 +58,7 @@ class LinuxDriver(BaseDriver):
 
             vm.tap_interface = f"tap-{vm_name}"
             self._exec(client, f"sudo ip tuntap add mode tap {vm.tap_interface}")
-            self._exec(client, f"sudo ovs-vsctl add-port {self.OVS_BRIDGE} {vm.tap_interface}")
+            self._exec(client, f"sudo ip link set {vm.tap_interface} up")
 
             vm.vnc_port = self.vnc_base_port + vm.index
             vm.vnc_ws_port = self.vnc_ws_base_port + vm.index
@@ -91,6 +91,8 @@ class LinuxDriver(BaseDriver):
                 vm.status = VMStatus.ACTIVE
                 logger.info("VM %s created on %s (PID=%d, VNC=%d)",
                             vm_name, host_ip, vm.qemu_pid, vm.vnc_port)
+
+                self._exec(client, f"sudo ovs-vsctl add-port {self.OVS_BRIDGE} {vm.tap_interface}")
             else:
                 vm.status = VMStatus.ERROR
                 vm.error_message = "QEMU process not found after start"
