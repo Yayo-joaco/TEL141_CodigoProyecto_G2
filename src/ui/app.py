@@ -14,7 +14,7 @@ from pathlib import Path
 import yaml
 from flask import (
     Flask, render_template, request, redirect, url_for,
-    jsonify, make_response, session, flash, send_file,
+    jsonify, make_response, session, flash, send_file, abort,
 )
 from werkzeug.security import generate_password_hash, check_password_hash
 
@@ -492,76 +492,68 @@ def admin_sessions():
 
 @app.route('/ws-proxy/<vm_id>')
 def ws_proxy(vm_id):
-    ws = request.environ.get('wsgi.websocket')
-    if not ws:
-        return jsonify({"error": "WebSocket connection required"}), 400
+    wsock = request.environ.get('wsgi.websocket')
+    if not wsock:
+        abort(400, 'WebSocket requerido')
+
     orch = get_orchestrator()
     vm = orch.db.get_vm_by_id(vm_id)
     if not vm:
-        return jsonify({"error": "VM not found"}), 404
+        abort(404)
     if not vm.host_ip or not vm.vnc_ws_port:
-        return jsonify({"error": "VM not ready"}), 503
+        abort(503)
 
-    worker_url = f"ws://{vm.host_ip}:{vm.vnc_ws_port}"
-    logger = logging.getLogger("ws-proxy")
-    logger.info("Proxy: %s -> %s", vm_id, worker_url)
+    target_url = f"ws://{vm.host_ip}:{vm.vnc_ws_port}"
+    app.logger.info("WS Proxy: %s (%s) -> %s", vm.name, vm_id, target_url)
 
-    worker_ws = None
     try:
-        worker_ws = ws_client.create_connection(worker_url, timeout=10)
+        remote = ws_client.create_connection(target_url, timeout=10)
     except Exception as e:
-        logger.error("Cannot connect to worker %s: %s", worker_url, e)
+        app.logger.error("Cannot connect to %s: %s", target_url, e)
         try:
-            ws.send(f"ERROR: Cannot reach VM at {worker_url}")
-            ws.close()
+            wsock.close()
         except Exception:
             pass
-        return ""
+        return ''
 
-    running = {"value": True}
-
-    def browser_to_worker():
+    def browser_to_vm():
         try:
-            while running["value"]:
-                msg = ws.receive()
-                if msg is None:
+            while True:
+                data = wsock.receive()
+                if data is None:
                     break
-                worker_ws.send_binary(msg) if isinstance(msg, bytes) else worker_ws.send(msg)
+                remote.send_binary(data) if isinstance(data, bytes) else remote.send(data)
         except WebSocketError:
             pass
-        except Exception as e:
-            logger.debug("browser->worker closed: %s", e)
-        finally:
-            running["value"] = False
-
-    def worker_to_browser():
-        try:
-            while running["value"]:
-                msg = worker_ws.recv()
-                if msg is None:
-                    break
-                ws.send(msg)
-        except ws_client.WebSocketConnectionClosedException:
+        except Exception:
             pass
-        except Exception as e:
-            logger.debug("worker->browser closed: %s", e)
         finally:
-            running["value"] = False
+            try:
+                remote.close()
+            except Exception:
+                pass
 
-    g1 = gevent.spawn(browser_to_worker)
-    g2 = gevent.spawn(worker_to_browser)
+    def vm_to_browser():
+        try:
+            while True:
+                data = remote.recv()
+                if data is None:
+                    break
+                wsock.send(data)
+        except WebSocketError:
+            pass
+        except Exception:
+            pass
+        finally:
+            try:
+                wsock.close()
+            except Exception:
+                pass
+
+    g1 = gevent.spawn(browser_to_vm)
+    g2 = gevent.spawn(vm_to_browser)
     gevent.joinall([g1, g2], timeout=300)
-
-    try:
-        worker_ws.close()
-    except Exception:
-        pass
-    try:
-        ws.close()
-    except Exception:
-        pass
-    logger.info("Proxy closed: %s", vm_id)
-    return ""
+    return ''
 
 
 # =============================================================
