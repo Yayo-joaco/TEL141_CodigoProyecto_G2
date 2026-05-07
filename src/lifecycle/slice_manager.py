@@ -130,6 +130,7 @@ class SliceManager:
         for vm in vms:
             if vm.status != VMStatus.DELETED:
                 self.driver.delete_vm(vm)
+                self.db.save_vm(vm)
         if slice_obj.vlan_id:
             self.network.teardown_slice_network(vms, slice_obj.vlan_id)
         slice_obj.status = SliceStatus.DELETED
