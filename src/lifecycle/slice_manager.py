@@ -26,14 +26,17 @@ class SliceManager:
         self.db = db
         self.base_image = base_image
 
-    def create_slice(self, slice_obj: Slice) -> List[VM]:
-        vms = self._build_vm_objects(slice_obj)
+    def create_slice(self, slice_obj: Slice, pre_placed_vms: List[VM] = None) -> List[VM]:
+        if pre_placed_vms:
+            vms = pre_placed_vms
+        else:
+            vms = self._build_vm_objects(slice_obj)
         slice_obj.status = SliceStatus.CREATING
 
         for vm in vms:
             placement = self._get_placement_for_vm(vm)
             if not placement:
-                self._rollback_slice(slice_obj, vms, "Placement data missing")
+                self._rollback_slice(slice_obj, vms, f"Placement missing for {vm.name}")
                 return []
             success = self.driver.create_vm(vm, placement, self.base_image)
             if not success:
@@ -61,12 +64,14 @@ class SliceManager:
     def edit_slice(self, slice_id: str, add_vms: int = 0,
                    remove_vm_ids: List[str] = None,
                    new_vcpus: int = None, new_ram_mb: int = None,
-                   new_disk_gb: int = None) -> Tuple[bool, str, Optional[dict]]:
+                   new_disk_gb: int = None,
+                   pre_placed_vms: List[VM] = None) -> Tuple[bool, str, Optional[dict]]:
         """
         Edit an existing slice:
           - Add N more VMs (with placement)
           - Remove specific VMs by ID
           - Change resource specs for future VMs
+          - pre_placed_vms: VMs already placed by orchestrator (with host_ip set)
         """
         remove_vm_ids = remove_vm_ids or []
         slice_obj = self.db.get_slice(slice_id)
@@ -92,18 +97,8 @@ class SliceManager:
                 logger.info("VM %s removed from slice %s", vm_to_remove.name, slice_obj.name)
 
         new_vms_list = []
-        if add_vms > 0:
-            next_index = len(active_vms)
-            for i in range(add_vms):
-                new_vm = VM(
-                    id="", slice_id=slice_id,
-                    name=f"{slice_obj.name}-vm{next_index + i + 1}",
-                    index=next_index + i,
-                    vcpus=new_vcpus or slice_obj.vcpus_per_vm,
-                    ram_mb=new_ram_mb or slice_obj.ram_mb_per_vm,
-                    disk_gb=new_disk_gb or slice_obj.disk_gb_per_vm,
-                    status=VMStatus.CREATING,
-                )
+        if add_vms > 0 and pre_placed_vms:
+            for new_vm in pre_placed_vms:
                 placement = self._get_placement_for_vm(new_vm)
                 if not placement:
                     return False, f"No se pudo ubicar VM {new_vm.name}", None
@@ -190,13 +185,15 @@ class SliceManager:
         return vms
 
     def _get_placement_for_vm(self, vm: VM):
+        if not vm.host_ip:
+            return None
         return PlacementDecision(
             vm_id=vm.id, vm_name=vm.name, vm_index=vm.index,
             host_ip=vm.host_ip, host_hostname="",
             vcpus_allocated=vm.vcpus, ram_mb_allocated=vm.ram_mb,
             disk_gb_allocated=vm.disk_gb,
-            success=bool(vm.host_ip),
-            reason="No host assigned" if not vm.host_ip else "",
+            success=True,
+            reason="",
         )
 
     def _rollback_slice(self, slice_obj: Slice, vms: List[VM], error: str):

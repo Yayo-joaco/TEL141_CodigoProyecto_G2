@@ -106,7 +106,7 @@ class Orchestrator:
         for vm, decision in zip(vms, plan.decisions):
             vm.host_ip = decision.host_ip
 
-        created_vms = self.slice_manager.create_slice(slice_obj)
+        created_vms = self.slice_manager.create_slice(slice_obj, pre_placed_vms=vms)
         if not created_vms:
             self.db.release_vlan(slice_obj.id)
             return {"success": False, "error": "Fallo en despliegue del slice"}
@@ -134,10 +134,10 @@ class Orchestrator:
                 if vm.id in (remove_vm_ids or []):
                     self.placement_engine.release_vm(vm)
 
+        extra_vms = []
         if add_vms > 0:
             slice_obj = self.db.get_slice(slice_id)
             if slice_obj:
-                extra_vms = []
                 current_count = len([v for v in vms if v.status != VMStatus.DELETED])
                 for i in range(add_vms):
                     new_vm = VM(id="", slice_id=slice_id,
@@ -152,10 +152,10 @@ class Orchestrator:
                     return {"success": False, "error": plan.error_message}
                 for vm, decision in zip(extra_vms, plan.decisions):
                     vm.host_ip = decision.host_ip
-                    self.db.save_vm(vm)
 
         success, msg, info = self.slice_manager.edit_slice(
-            slice_id, add_vms, remove_vm_ids, new_vcpus, new_ram_mb, new_disk_gb)
+            slice_id, add_vms, remove_vm_ids, new_vcpus, new_ram_mb, new_disk_gb,
+            pre_placed_vms=extra_vms)
         return {"success": success, "message": msg, "slice": info}
 
     def delete_slice(self, slice_id: str, user: User = None) -> dict:
