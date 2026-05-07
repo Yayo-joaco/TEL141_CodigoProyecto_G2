@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Panel - PUCP Cloud Orchestrator</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="header">
+        <div>
+            <h1>🛡 Panel de Administración</h1>
+            <span style="color:#8ab4d8;font-size:13px;">
+                <a href="/" style="color:#4db8ff;">← Dashboard</a> |
+                <a href="/admin/sessions" style="color:#4db8ff;">Sesiones Activas</a> |
+                <a href="/images" style="color:#4db8ff;">Imágenes</a>
+            </span>
+        </div>
+        <div>
+            <span class="badge">Admin</span>
+            <a href="/logout" class="btn btn-sm btn-danger" style="margin-left:8px;">Salir</a>
+        </div>
+    </div>
+
+    <div class="container">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        {% for category, message in messages %}
+        <div class="alert alert-{{ category }}">{{ message }}</div>
+        {% endfor %}
+        {% endif %}
+        {% endwith %}
+
+        <!-- CREATE USER -->
+        <div class="card">
+            <h2>➕ Crear Usuario</h2>
+            <form method="POST" action="/admin/users/create">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Usuario</label>
+                        <input type="text" name="username" placeholder="nuevo_usuario" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Contraseña</label>
+                        <input type="password" name="password" required>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Rol</label>
+                        <select name="role">
+                            <option value="user">Usuario</option>
+                            <option value="operator">Operador</option>
+                            <option value="admin">Admin</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Email</label>
+                        <input type="email" name="email" placeholder="email@ejemplo.com">
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary">Crear Usuario</button>
+            </form>
+        </div>
+
+        <!-- USERS LIST -->
+        <div class="card">
+            <h2>👥 Usuarios Registrados</h2>
+            {% if users %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Usuario</th>
+                        <th>Rol</th>
+                        <th>Email</th>
+                        <th>Activo</th>
+                        <th>Creado</th>
+                        <th>Acción</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for u in users %}
+                    <tr>
+                        <td style="font-family:monospace;font-size:11px;">{{ u.id }}</td>
+                        <td><strong>{{ u.username }}</strong></td>
+                        <td><span class="badge">{{ u.role }}</span></td>
+                        <td>{{ u.email or '—' }}</td>
+                        <td class="{{ 'status-active' if u.is_active else 'status-error' }}">
+                            {{ 'Activo' if u.is_active else 'Inactivo' }}
+                        </td>
+                        <td style="font-size:11px;">{{ u.created_at[:10] }}</td>
+                        <td>
+                            <a href="/admin/users/delete/{{ u.id }}" class="btn btn-sm btn-danger"
+                               onclick="return confirm('¿Desactivar usuario {{ u.username }}?')">Desactivar</a>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p style="color:#8ab4d8;text-align:center;">No hay usuarios.</p>
+            {% endif %}
+        </div>
+
+        <!-- ALL SLICES -->
+        <div class="card">
+            <h2>📋 Todos los Slices</h2>
+            {% if all_slices %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Nombre</th>
+                        <th>Topología</th>
+                        <th>VMs</th>
+                        <th>Estado</th>
+                        <th>Creador</th>
+                        <th>Fecha</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for s in all_slices %}
+                    <tr>
+                        <td><a href="/slice/{{ s.id }}" style="color:#4db8ff;">{{ s.name }}</a></td>
+                        <td>{{ s.topology | capitalize }}</td>
+                        <td>{{ s.num_vms }}</td>
+                        <td class="status-{{ s.status }}">{{ s.status }}</td>
+                        <td>{{ s.created_by }}</td>
+                        <td style="font-size:11px;">{{ s.created_at[:10] }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p style="color:#8ab4d8;text-align:center;">No hay slices.</p>
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="footer">
+        PUCP Cloud Orchestrator - Panel Admin - TEL141 2026-1
+    </div>
+</body>
+</html>

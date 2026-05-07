@@ -1,43 +1,27 @@
 # ==============================================================
-# Orchestrator - Central coordinator (brain of the system)
-#
-# Flow (from architecture doc):
-#   1. Receives validated request from UI/API Gateway
-#   2. Builds domain objects (Slice, VMs)
-#   3. Queries Persistence for hosts, images, state
-#   4. Invokes VM Placement to decide VM→host mapping
-#   5. Invokes Lifecycle to execute CRUD
-#   6. Lifecycle calls Drivers + Networking
-#   7. Saves final state and logs
+# Orchestrator - Central coordinator v2 (RBAC + Edit + Templates)
 # ==============================================================
 
+import json
 import logging
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from .models.slice import Slice, SliceStatus, TopologyType
 from .models.vm import VM, VMStatus
 from .models.host import Host
+from .models.user import User, Role
 from .models.topology import Topology
-from .models.placement_decision import PlacementPlan
 from .placement.placement_engine import PlacementEngine
 from .lifecycle.slice_manager import SliceManager
 from .drivers.linux_driver import LinuxDriver
 from .networking.network_manager import NetworkManager
 from .database.db_manager import DatabaseManager
+from .auth.auth_manager import AuthManager
 
 logger = logging.getLogger("orchestrator")
 
 
 class Orchestrator:
-    """
-    Central orchestrator that coordinates:
-      - VM Placement (R4)
-      - Lifecycle/Slice Manager (R1C)
-      - Linux Driver (R2)
-      - Networking & Security (R5)
-      - Persistence (MariaDB)
-    """
-
     def __init__(self, hosts: List[Host], driver: LinuxDriver,
                  network: NetworkManager, db: DatabaseManager,
                  base_image: str = "/home/ubuntu/cirros-base.img"):
@@ -48,124 +32,224 @@ class Orchestrator:
         self.base_image = base_image
         self.placement_engine = PlacementEngine(hosts)
         self.slice_manager = SliceManager(driver, network, db, base_image)
+        self.auth = AuthManager(db)
+
+    # ---- Authentication ----
+
+    def login(self, username: str, password: str) -> Tuple[bool, Optional[dict]]:
+        return self.auth.authenticate(username, password)
+
+    def register(self, username: str, password: str,
+                 role: Role = Role.USER, email: str = None) -> Tuple[bool, str]:
+        return self.auth.register_user(username, password, role, email)
+
+    def logout(self, user_id: str):
+        self.auth.logout(user_id)
+
+    def validate_request(self, token: str, required_role: Role = None) -> Tuple[bool, Optional[User], str]:
+        return self.auth.validate_request(token, required_role)
+
+    # ---- Slice Operations ----
 
     def create_slice(self, name: str, topology: str, num_vms: int,
                      vcpus: int = 1, ram_mb: int = 512, disk_gb: int = 2,
                      vlan_id: int = 300, subnet: str = "10.60.3.0/24",
                      enable_dhcp: bool = False, enable_internet: bool = False,
                      created_by: str = "admin") -> dict:
-        """
-        Complete flow for creating a slice:
-
-        Step 1: Build Slice domain object
-        Step 2: Build VM objects for each node
-        Step 3: Query DB for available hosts
-        Step 4: Run VM Placement (greedy) to assign VM → host
-        Step 5: Apply placement to VMs
-        Step 6: Invoke Lifecycle to create VMs + configure network
-        Step 7: Persist final state
-        Step 8: Return result
-        """
         try:
             topo = TopologyType(topology)
         except ValueError:
-            return {"success": False, "error": f"Invalid topology: {topology}",
+            return {"success": False, "error": f"Topología inválida: {topology}",
                     "valid_topologies": [t.value for t in TopologyType]}
 
-        if num_vms < 2:
-            return {"success": False, "error": "Slice needs at least 2 VMs"}
+        if num_vms < 1:
+            return {"success": False, "error": "Se necesita al menos 1 VM"}
 
         slice_obj = Slice(
-            id="",
-            name=name,
-            topology=topo,
-            num_vms=num_vms,
-            vcpus_per_vm=vcpus,
-            ram_mb_per_vm=ram_mb,
-            disk_gb_per_vm=disk_gb,
-            vlan_id=vlan_id,
-            subnet=subnet,
-            enable_dhcp=enable_dhcp,
-            enable_internet=enable_internet,
-            status=SliceStatus.CREATING,
-            created_by=created_by,
+            id="", name=name, topology=topo, num_vms=num_vms,
+            vcpus_per_vm=vcpus, ram_mb_per_vm=ram_mb, disk_gb_per_vm=disk_gb,
+            vlan_id=vlan_id, subnet=subnet,
+            enable_dhcp=enable_dhcp, enable_internet=enable_internet,
+            status=SliceStatus.CREATING, created_by=created_by,
         )
-
-        logger.info("Orchestrator: Starting slice creation '%s' (%s, %d VMs)",
-                     name, topology, num_vms)
 
         vms = []
         for i in range(num_vms):
-            vm = VM(
-                id="",
-                slice_id=slice_obj.id,
-                name=f"{name}-vm{i+1}",
-                index=i,
-                vcpus=vcpus,
-                ram_mb=ram_mb,
-                disk_gb=disk_gb,
-                status=VMStatus.PENDING,
-            )
+            vm = VM(id="", slice_id=slice_obj.id,
+                    name=f"{name}-vm{i+1}", index=i,
+                    vcpus=vcpus, ram_mb=ram_mb, disk_gb=disk_gb,
+                    status=VMStatus.PENDING)
             vms.append(vm)
 
-        logger.info("Orchestrator: Running VM Placement for %d VMs", num_vms)
         plan = self.placement_engine.place_vms(slice_obj.id, vms)
-
         if not plan.success:
             slice_obj.status = SliceStatus.ERROR
             slice_obj.error_message = plan.error_message
             self.db.save_slice(slice_obj)
             self.db.save_log(slice_obj.id, "orchestrator", "ERROR",
-                             f"Placement failed: {plan.error_message}")
+                             f"Placement failed: {plan.error_message}", user_id=created_by)
             return {"success": False, "error": plan.error_message}
 
         for vm, decision in zip(vms, plan.decisions):
             vm.host_ip = decision.host_ip
-            vm.status = VMStatus.PENDING
 
-        logger.info("Orchestrator: Invoking Lifecycle to create VMs")
         created_vms = self.slice_manager.create_slice(slice_obj)
         if not created_vms:
-            return {"success": False, "error": "Slice creation failed during deployment"}
-
-        logger.info("Orchestrator: Slice '%s' created successfully", name)
+            return {"success": False, "error": "Fallo en despliegue del slice"}
 
         links = Topology.get_links(topo, num_vms)
         self.db.save_log(slice_obj.id, "orchestrator", "INFO",
-                         f"Slice '{name}' created: {num_vms} VMs, "
-                         f"topology={topology}, links={links}")
+                         f"Slice '{name}' creado: {num_vms} VMs, topologia={topology}, links={links}",
+                         user_id=created_by)
 
         return {
-            "success": True,
-            "slice_id": slice_obj.id,
-            "name": slice_obj.name,
-            "topology": topology,
-            "num_vms": num_vms,
-            "vms": [vm.to_dict() for vm in created_vms],
-            "links": links,
+            "success": True, "slice_id": slice_obj.id, "name": slice_obj.name,
+            "topology": topology, "num_vms": num_vms,
+            "vms": [vm.to_dict() for vm in created_vms], "links": links,
         }
 
-    def delete_slice(self, slice_id: str) -> dict:
-        logger.info("Orchestrator: Deleting slice %s", slice_id)
+    def edit_slice(self, slice_id: str, add_vms: int = 0,
+                   remove_vm_ids: List[str] = None,
+                   new_vcpus: int = None, new_ram_mb: int = None,
+                   new_disk_gb: int = None, user: User = None) -> dict:
+        vms = self.db.get_vms_for_slice(slice_id)
+        if remove_vm_ids:
+            for vm in vms:
+                if vm.id in (remove_vm_ids or []):
+                    self.placement_engine.release_vm(vm)
+
+        if add_vms > 0:
+            slice_obj = self.db.get_slice(slice_id)
+            if slice_obj:
+                extra_vms = []
+                current_count = len([v for v in vms if v.status != VMStatus.DELETED])
+                for i in range(add_vms):
+                    new_vm = VM(id="", slice_id=slice_id,
+                                name=f"{slice_obj.name}-vm{current_count + i + 1}",
+                                index=current_count + i,
+                                vcpus=new_vcpus or slice_obj.vcpus_per_vm,
+                                ram_mb=new_ram_mb or slice_obj.ram_mb_per_vm,
+                                disk_gb=new_disk_gb or slice_obj.disk_gb_per_vm)
+                    extra_vms.append(new_vm)
+                plan = self.placement_engine.place_vms(slice_id, extra_vms)
+                if not plan.success:
+                    return {"success": False, "error": plan.error_message}
+                for vm, decision in zip(extra_vms, plan.decisions):
+                    vm.host_ip = decision.host_ip
+                    self.db.save_vm(vm)
+
+        success, msg, info = self.slice_manager.edit_slice(
+            slice_id, add_vms, remove_vm_ids, new_vcpus, new_ram_mb, new_disk_gb)
+        return {"success": success, "message": msg, "slice": info}
+
+    def delete_slice(self, slice_id: str, user: User = None) -> dict:
+        slice_obj = self.db.get_slice(slice_id)
+        if slice_obj and user and slice_obj.created_by != user.username and not user.can_force_delete():
+            return {"success": False, "error": "No tienes permiso para eliminar este slice"}
         vms = self.db.get_vms_for_slice(slice_id)
         for vm in vms:
             self.placement_engine.release_vm(vm)
         success = self.slice_manager.delete_slice(slice_id)
+        self.db.save_log(slice_id, "orchestrator", "INFO",
+                         f"Slice eliminado por {user.username if user else 'system'}",
+                         user_id=user.id if user else None)
         return {"success": success, "slice_id": slice_id}
 
     def get_slice(self, slice_id: str) -> Optional[dict]:
         return self.slice_manager.get_slice_info(slice_id)
 
-    def list_slices(self) -> List[dict]:
-        return self.slice_manager.list_all_slices()
+    def list_slices(self, user: User = None) -> List[dict]:
+        if user and user.can_view_all_slices():
+            return self.slice_manager.list_all_slices_admin()
+        return self.slice_manager.list_all_slices(created_by=user.username if user else None)
 
     def get_hosts_status(self) -> List[dict]:
         return self.slice_manager.get_hosts_status()
 
-    def get_logs(self, slice_id: str) -> List[dict]:
+    def refresh_hosts(self) -> dict:
+        """Query real resources from all hosts via SSH and update DB."""
+        updated = 0
+        failed = []
+        for host in self.hosts:
+            res = self.driver.get_host_resources(host.ip)
+            if res:
+                self.db.update_host_resources(
+                    hostname=host.hostname, host_ip=host.ip,
+                    total_vcpus=res.get("total_vcpus", host.total_vcpus),
+                    total_ram_mb=res.get("total_ram_mb", host.total_ram_mb),
+                    total_disk_gb=res.get("total_disk_gb", host.total_disk_gb),
+                    cpu_usage_pct=res.get("cpu_usage_pct", 0),
+                    used_ram_mb=res.get("used_ram_mb", 0),
+                    used_disk_gb=res.get("used_disk_gb", 0),
+                )
+                updated += 1
+                logger.info("Host %s refreshed: CPU=%d, RAM=%dMB, Disk=%dGB",
+                            host.hostname, res.get("total_vcpus"),
+                            res.get("total_ram_mb"), res.get("total_disk_gb"))
+            else:
+                failed.append(host.hostname)
+        # Reload hosts from DB into memory for Placement engine
+        db_hosts = self.db.get_hosts()
+        if db_hosts:
+            self.hosts[:] = db_hosts
+            self.placement_engine.hosts = self.hosts
+        return {"refreshed": updated, "failed": failed}
+
+    def get_logs(self, slice_id: str, user: User = None) -> List[dict]:
+        if user and user.can_view_all_slices():
+            return self.db.get_all_logs(limit=200)
         return self.db.get_logs_for_slice(slice_id)
 
-    def import_image(self, image_path: str, image_name: str) -> dict:
+    # ---- Template Export/Import ----
+
+    def export_template(self, slice_id: str) -> Optional[dict]:
+        return self.slice_manager.export_template(slice_id)
+
+    def import_template(self, template_data: dict, created_by: str = "admin") -> dict:
+        return self.create_slice(
+            name=template_data.get("name", f"slice-{template_data.get('topology', 'lineal')}"),
+            topology=template_data.get("topology", "lineal"),
+            num_vms=template_data.get("num_vms", 4),
+            vcpus=template_data.get("vcpus_per_vm", 1),
+            ram_mb=template_data.get("ram_mb_per_vm", 512),
+            disk_gb=template_data.get("disk_gb_per_vm", 2),
+            vlan_id=template_data.get("vlan_id", 300),
+            subnet=template_data.get("subnet", "10.60.3.0/24"),
+            enable_dhcp=template_data.get("enable_dhcp", False),
+            enable_internet=template_data.get("enable_internet", False),
+            created_by=created_by,
+        )
+
+    # ---- Template Management ----
+
+    def save_template(self, name: str, config: dict, description: str = "",
+                      created_by: str = "admin") -> str:
+        return self.db.save_template(name, config, description, created_by)
+
+    def list_templates(self) -> List[dict]:
+        return self.db.list_templates()
+
+    # ---- Image Management ----
+
+    def import_image(self, name: str, filename: str, path: str,
+                     format: str = "qcow2", size_gb: int = 2,
+                     uploaded_by: str = "admin") -> dict:
+        img_id = self.db.save_image(name, filename, path, format, size_gb, uploaded_by)
         self.db.save_log("system", "orchestrator", "INFO",
-                         f"Image imported: {image_name} from {image_path}")
-        return {"success": True, "image_name": image_name, "path": image_path}
+                         f"Image '{name}' imported by {uploaded_by}", user_id=uploaded_by)
+        return {"success": True, "image_id": img_id, "name": name, "path": path}
+
+    def list_images(self) -> List[dict]:
+        return self.db.list_images()
+
+    # ---- User Management (Admin only) ----
+
+    def list_users(self) -> List[dict]:
+        return self.db.list_users()
+
+    def delete_user(self, user_id: str) -> dict:
+        self.db.delete_user_record(user_id)
+        return {"success": True}
+
+    def get_active_sessions(self, user: User) -> list:
+        return self.auth.get_active_sessions(user)

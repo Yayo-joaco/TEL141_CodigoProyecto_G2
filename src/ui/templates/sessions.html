@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sesiones - PUCP Cloud Orchestrator</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="header">
+        <div>
+            <h1>🔑 Sesiones Activas</h1>
+            <span style="color:#8ab4d8;font-size:13px;">
+                <a href="/admin" style="color:#4db8ff;">← Admin</a> |
+                <a href="/" style="color:#4db8ff;">Dashboard</a>
+            </span>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="card">
+            <h2>Usuarios Conectados</h2>
+            {% if sessions %}
+            <table>
+                <thead>
+                    <tr><th>User ID</th><th>Login</th></tr>
+                </thead>
+                <tbody>
+                    {% for s in sessions %}
+                    <tr>
+                        <td>{{ s.user_id }}</td>
+                        <td>{{ s.login_at }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p style="color:#8ab4d8;text-align:center;">No hay sesiones activas.</p>
+            {% endif %}
+        </div>
+    </div>
+</body>
+</html>

@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Imágenes - PUCP Cloud Orchestrator</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="header">
+        <div>
+            <h1>🖼 Gestión de Imágenes</h1>
+            <span style="color:#8ab4d8;font-size:13px;">
+                <a href="/" style="color:#4db8ff;">← Volver</a>
+            </span>
+        </div>
+        <div>
+            <span class="badge">{{ user_role }}</span>
+        </div>
+    </div>
+
+    <div class="container">
+        {% if user_role == "admin" %}
+        <div class="card">
+            <h2>📤 Importar Imagen</h2>
+            <form method="POST" action="/import-image">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Nombre</label>
+                        <input type="text" name="image_name" placeholder="Ej: ubuntu-22.04" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Archivo</label>
+                        <input type="text" name="filename" value="ubuntu-22.04.qcow2" required>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Ruta en servidor</label>
+                        <input type="text" name="path" value="/home/ubuntu/ubuntu-22.04.qcow2" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Formato</label>
+                        <select name="format">
+                            <option value="qcow2">QCOW2</option>
+                            <option value="raw">RAW</option>
+                        </select>
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary">Importar Imagen</button>
+            </form>
+        </div>
+        {% endif %}
+
+        <div class="card">
+            <h2>📦 Imágenes Disponibles</h2>
+            {% if images %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Nombre</th>
+                        <th>Archivo</th>
+                        <th>Formato</th>
+                        <th>Tamaño (GB)</th>
+                        <th>Subido por</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for img in images %}
+                    <tr>
+                        <td><strong>{{ img.name }}</strong></td>
+                        <td style="font-family:monospace;font-size:12px;">{{ img.filename }}</td>
+                        <td>{{ img.format | upper }}</td>
+                        <td>{{ img.size_gb }}</td>
+                        <td>{{ img.uploaded_by }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p style="color:#8ab4d8;text-align:center;padding:20px;">No hay imágenes registradas.</p>
+            {% endif %}
+        </div>
+    </div>
+</body>
+</html>

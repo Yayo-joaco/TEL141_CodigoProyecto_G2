@@ -3,3 +3,5 @@ paramiko==3.4.0
 PyMySQL==1.1.0
 SQLAlchemy==2.0.30
 PyYAML==6.0.1
+PyJWT==2.8.0
+cryptography==42.0.5

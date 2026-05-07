@@ -9,40 +9,77 @@
 <body>
     <div class="header">
         <div>
-            <h1>☁ Detalle del Slice</h1>
+            <h1>☁ Slice: {{ slice.name }}</h1>
             <span style="color:#8ab4d8;font-size:13px;">
-                <a href="/" style="color:#4db8ff;">← Volver</a>
+                <a href="/" style="color:#4db8ff;">← Dashboard</a> |
+                <a href="/export-file/{{ slice.id }}" style="color:#4db8ff;">⬇ Exportar JSON</a>
             </span>
         </div>
         <div>
-            <span class="badge">FASE 1</span>
+            <span class="badge">{{ user_role or '' }}</span>
+            <a href="/logout" class="btn btn-sm btn-danger" style="margin-left:8px;">Salir</a>
         </div>
     </div>
 
     <div class="container">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        {% for category, message in messages %}
+        <div class="alert alert-{{ category }}">{{ message }}</div>
+        {% endfor %}
+        {% endif %}
+        {% endwith %}
+
+        <!-- SLICE INFO -->
         <div class="card">
-            <h2>{{ slice.name }}</h2>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:14px;">
-                <div>
-                    <strong>ID:</strong> {{ slice.id }}<br>
-                    <strong>Topología:</strong> {{ slice.topology | capitalize }}<br>
-                    <strong>VMs:</strong> {{ slice.num_vms }}<br>
-                    <strong>VLAN:</strong> {{ slice.vlan_id }}<br>
-                    <strong>Subred:</strong> {{ slice.subnet }}
-                </div>
-                <div>
-                    <strong>Estado:</strong> <span class="status-{{ slice.status }}">{{ slice.status }}</span><br>
-                    <strong>vCPU/VM:</strong> {{ slice.vcpus_per_vm }}<br>
-                    <strong>RAM/VM:</strong> {{ slice.ram_mb_per_vm }}MB<br>
-                    <strong>Disco/VM:</strong> {{ slice.disk_gb_per_vm }}GB<br>
-                    <strong>DHCP:</strong> {{ 'Sí' if slice.enable_dhcp else 'No' }}<br>
-                    <strong>Internet:</strong> {{ 'Sí' if slice.enable_internet else 'No' }}
-                </div>
+            <h2>📋 Información del Slice</h2>
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;font-size:13px;">
+                <div><strong>ID:</strong> {{ slice.id }}</div>
+                <div><strong>Topología:</strong> {{ slice.topology | capitalize }}</div>
+                <div><strong>VMs:</strong> {{ slice.num_vms }}</div>
+                <div><strong>VLAN:</strong> {{ slice.vlan_id }}</div>
+                <div><strong>Subred:</strong> {{ slice.subnet }}</div>
+                <div><strong>Estado:</strong> <span class="status-{{ slice.status }}">{{ slice.status }}</span></div>
+                <div><strong>vCPU/VM:</strong> {{ slice.vcpus_per_vm }}</div>
+                <div><strong>RAM/VM:</strong> {{ slice.ram_mb_per_vm }}MB</div>
+                <div><strong>Disco/VM:</strong> {{ slice.disk_gb_per_vm }}GB</div>
+                <div><strong>DHCP:</strong> {{ 'Sí' if slice.enable_dhcp else 'No' }}</div>
+                <div><strong>Internet:</strong> {{ 'Sí' if slice.enable_internet else 'No' }}</div>
+                <div><strong>Creado por:</strong> {{ slice.created_by }}</div>
             </div>
         </div>
 
+        <!-- EDIT SLICE FORM -->
         <div class="card">
-            <h2>💻 Máquinas Virtuales</h2>
+            <h2>✏️ Editar Slice</h2>
+            <form method="POST" action="/edit/{{ slice.id }}">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Agregar VMs</label>
+                        <input type="number" name="add_vms" value="0" min="0" max="10">
+                    </div>
+                    <div class="form-group">
+                        <label>Nuevo vCPUs/VM (opcional)</label>
+                        <input type="number" name="new_vcpus" placeholder="{{ slice.vcpus_per_vm }}" min="1" max="8">
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Nueva RAM/VM MB (opcional)</label>
+                        <input type="number" name="new_ram_mb" placeholder="{{ slice.ram_mb_per_vm }}" min="128" max="8192" step="128">
+                    </div>
+                    <div class="form-group">
+                        <label>Nuevo Disco/VM GB (opcional)</label>
+                        <input type="number" name="new_disk_gb" placeholder="{{ slice.disk_gb_per_vm }}" min="1" max="50">
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary">Aplicar Cambios</button>
+            </form>
+        </div>
+
+        <!-- VMs TABLE -->
+        <div class="card">
+            <h2>💻 Máquinas Virtuales ({{ vms | length }})</h2>
             {% if vms %}
             <table>
                 <thead>
@@ -55,6 +92,7 @@
                         <th>MAC</th>
                         <th>VNC Port</th>
                         <th>Token Consola</th>
+                        <th>Acción</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -69,10 +107,11 @@
                         <td>{{ vm.vnc_port or '—' }}</td>
                         <td>
                             {% if vm.vnc_token %}
-                            <span style="font-family:monospace;font-size:10px;word-break:break-all;">{{ vm.vnc_token }}</span>
-                            {% else %}
-                            —
-                            {% endif %}
+                            <code style="font-size:10px;">{{ vm.vnc_token }}</code>
+                            {% else %}—{% endif %}
+                        </td>
+                        <td>
+                            <a href="/edit/{{ slice.id }}?remove_vm={{ vm.id }}" class="btn btn-sm btn-danger" style="padding:2px 8px;">X</a>
                         </td>
                     </tr>
                     {% endfor %}
@@ -83,17 +122,13 @@
             {% endif %}
         </div>
 
+        <!-- LOGS -->
         <div class="card">
-            <h2>📝 Logs del Slice</h2>
+            <h2>📝 Logs</h2>
             {% if logs %}
             <table>
                 <thead>
-                    <tr>
-                        <th>Timestamp</th>
-                        <th>Módulo</th>
-                        <th>Nivel</th>
-                        <th>Mensaje</th>
-                    </tr>
+                    <tr><th>Timestamp</th><th>Módulo</th><th>Nivel</th><th>User</th><th>Mensaje</th></tr>
                 </thead>
                 <tbody>
                     {% for log in logs %}
@@ -101,6 +136,7 @@
                         <td style="font-size:11px;">{{ log.created_at[:19] }}</td>
                         <td>{{ log.module }}</td>
                         <td>{{ log.level }}</td>
+                        <td>{{ log.user_id or '—' }}</td>
                         <td>{{ log.message }}</td>
                     </tr>
                     {% endfor %}
@@ -112,8 +148,6 @@
         </div>
     </div>
 
-    <div class="footer">
-        PUCP Private Cloud Orchestrator - TEL141 Ingeniería de Redes Cloud 2026-1 - Grupo 2
-    </div>
+    <div class="footer">PUCP Cloud Orchestrator - TEL141 2026-1 - Grupo 2</div>
 </body>
 </html>

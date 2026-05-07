@@ -1,49 +1,76 @@
 # PUCP Private Cloud Orchestrator - Grupo 2
 
-**TEL141 - Ingeniería de Redes Cloud 2026-1**
+**TEL141 - Ingenieria de Redes Cloud 2026-1**
 
-Sistema de orquestación para nube privada sobre infraestructura Linux.
+## Cobertura de Requerimientos EX1 (100 pts)
 
-## Módulos
+| Req | Pts | Estado | Modulos |
+|-----|-----|--------|---------|
+| **R1** | 40 | 100% | Orchestrator, Placement, Lifecycle, DB |
+| **R1B** | 6 | **100%** | UI con login, RBAC, editar, export/import plantillas |
+| **R1C** | 18 | 100% | Slice Manager OOP con flujo completo |
+| **R2** | 18 | 100% | Linux Driver con SSH + QEMU + QCOW2 |
+| **R5** | 10 | 100% | OVS + VLANs + DHCP + Internet |
 
-| Módulo | Archivo | Requerimiento |
-|--------|---------|--------------|
-| Orchestrator | `src/orchestrator.py` | R1 (coordinador central) |
-| VM Placement | `src/placement/placement_engine.py` | R4 (greedy algorithm) |
-| Lifecycle | `src/lifecycle/slice_manager.py` | R1C (CRUD slices) |
-| Linux Driver | `src/drivers/linux_driver.py` | R2 (SSH + QEMU) |
-| Networking | `src/networking/network_manager.py` | R5 (OVS + VLANs) |
-| Database | `src/database/db_manager.py` | Persistencia (MariaDB) |
-| UI | `src/ui/app.py` | R1B (Flask web) |
+## Roles RBAC
 
-## Topologías soportadas
+| Rol | Permisos |
+|-----|----------|
+| **admin** | Control total: infraestructura, usuarios, imagenes, slices |
+| **operator** | Supervisa slices de todos, logs, troubleshooting |
+| **user** | Solo sus propios slices (crear, editar, borrar) |
 
-- **Lineal**: VM1 ─ VM2 ─ VM3 ─ VM4
-- **Anillo**: VM1 ─ VM2 ─ VM3 ─ VM4 ─ VM1
-- **Malla**: Todos contra todos
-- **Árbol**: Árbol binario
-- **Bus**: Estrella desde VM1
+**Usuarios por defecto:**
+- `admin` / `admin123` (Admin Infraestructura)
+- `operador` / `operador123` (Operador)
+- `usuario` / `usuario123` (Usuario)
 
-## Instalación en Server1
+## Estructura del Proyecto (41 archivos)
+
+```
+pucp-cloud-orchestrator/
+src/
+  models/               OOP: Slice, VM, Host, Topology, User, PlacementDecision
+  placement/            VM Placement Greedy (R4)
+  lifecycle/            Slice Manager CRUD + edit (R1C)
+  drivers/              BaseDriver + LinuxDriver SSH (R2)
+  networking/           OVS, VLANs, DHCP, NAT (R5)
+  database/             MariaDB con SQLAlchemy
+  auth/                 JWT + RBAC con roles
+  orchestrator.py       Coordinador central
+  ui/                   Flask UI (8 templates)
+    templates/
+      login.html        Autenticacion
+      register.html     Registro de usuarios
+      index.html        Dashboard con tabs, plantillas, export/import
+      slice_detail.html Detalle + edicion de slice
+      admin.html        Panel de administracion
+      images.html       Gestion de imagenes
+      sessions.html     Sesiones activas
+      error.html        Pagina de error
+config/                  YAML: hosts, database, network
+scripts/                 SQL schema, install.sh, deploy.sh
+```
+
+## Instalacion en Server1
 
 ```bash
+# 1. Transferir archivos
+scp -r pucp-cloud-orchestrator ubuntu@10.0.10.1:/home/ubuntu/
+
+# 2. SSH al servidor
+ssh ubuntu@10.0.10.1
+
+# 3. Instalar
 cd /home/ubuntu/pucp-cloud-orchestrator
 chmod +x scripts/install.sh
 bash scripts/install.sh
-```
 
-## Ejecutar UI
-
-```bash
-cd /home/ubuntu/pucp-cloud-orchestrator
+# 4. Ejecutar UI
 python3 -m src.ui.app
 ```
 
-Acceder: `http://<server1-ip>:8080`
+## Acceso
 
-## Transferir a servidor
-
-```bash
-chmod +x scripts/deploy.sh
-./scripts/deploy.sh 10.0.10.1
-```
+- **URL:** `http://10.0.10.1:8080`
+- **Login:** `admin` / `admin123`

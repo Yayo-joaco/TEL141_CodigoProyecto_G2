@@ -1,18 +1,21 @@
 # ==============================================================
-# Database Manager - MariaDB persistence layer
-# Uses SQLAlchemy ORM for OOP-based persistence (no raw SQL in Orchestrator)
+# Database Manager - MariaDB persistence layer (v2 + RBAC)
+# Uses SQLAlchemy ORM for OOP-based persistence
 # ==============================================================
 
+import json
 import logging
 from datetime import datetime
 from typing import List, Optional
 
 from sqlalchemy import create_engine, Column, String, Integer, Float, Text, DateTime
-from sqlalchemy.orm import sessionmaker, declarative_base, Session
+from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.ext.declarative import declarative_base
 
 from ..models.slice import Slice, SliceStatus, TopologyType
 from ..models.vm import VM, VMStatus
 from ..models.host import Host, HostRole
+from ..models.user import User, Role
 
 logger = logging.getLogger("orchestrator.database")
 Base = declarative_base()
@@ -22,9 +25,84 @@ Base = declarative_base()
 # SQLAlchemy ORM Models
 # =============================================================
 
+class UserRecord(Base):
+    __tablename__ = "users"
+    id = Column(String(64), primary_key=True)
+    username = Column(String(255), unique=True, nullable=False)
+    password_hash = Column(String(255), nullable=False)
+    role = Column(String(50), default="user")
+    email = Column(String(255), nullable=True)
+    is_active = Column(Integer, default=1)
+    max_vcpus = Column(Integer, default=16)
+    max_ram_mb = Column(Integer, default=16384)
+    max_slices = Column(Integer, default=10)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_user(self) -> User:
+        return User(
+            id=self.id,
+            username=self.username,
+            password_hash=self.password_hash,
+            role=Role(self.role) if self.role else Role.USER,
+            email=self.email,
+            is_active=bool(self.is_active),
+            max_vcpus=self.max_vcpus,
+            max_ram_mb=self.max_ram_mb,
+            max_slices=self.max_slices,
+            created_at=self.created_at.isoformat() if self.created_at else "",
+        )
+
+
+class ImageRecord(Base):
+    __tablename__ = "images"
+    id = Column(String(64), primary_key=True)
+    name = Column(String(255), nullable=False)
+    filename = Column(String(255), nullable=False)
+    path = Column(String(512), nullable=False)
+    format = Column(String(20), default="qcow2")
+    sha256 = Column(String(128), nullable=True)
+    size_gb = Column(Integer, default=2)
+    uploaded_by = Column(String(255), default="admin")
+    is_active = Column(Integer, default=1)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "filename": self.filename,
+            "path": self.path,
+            "format": self.format,
+            "sha256": self.sha256,
+            "size_gb": self.size_gb,
+            "uploaded_by": self.uploaded_by,
+            "is_active": bool(self.is_active),
+            "created_at": self.created_at.isoformat() if self.created_at else "",
+        }
+
+
+class TemplateRecord(Base):
+    __tablename__ = "templates"
+    id = Column(String(64), primary_key=True)
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    config_json = Column(Text, nullable=False)
+    created_by = Column(String(255), default="admin")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "config": json.loads(self.config_json) if self.config_json else {},
+            "created_by": self.created_by,
+            "created_at": self.created_at.isoformat() if self.created_at else "",
+        }
+
+
 class SliceRecord(Base):
     __tablename__ = "slices"
-
     id = Column(String(64), primary_key=True)
     name = Column(String(255), nullable=False)
     topology = Column(String(50), nullable=False)
@@ -40,7 +118,7 @@ class SliceRecord(Base):
     created_by = Column(String(255), default="admin")
     error_message = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
 
     def to_slice(self) -> Slice:
         return Slice(
@@ -65,11 +143,10 @@ class SliceRecord(Base):
 
 class VMRecord(Base):
     __tablename__ = "vms"
-
     id = Column(String(64), primary_key=True)
     slice_id = Column(String(64), nullable=False)
     name = Column(String(255), nullable=False)
-    index = Column(Integer, nullable=False)
+    index = Column("index", Integer, nullable=False)
     host_ip = Column(String(50), nullable=True)
     vcpus = Column(Integer, default=1)
     ram_mb = Column(Integer, default=512)
@@ -108,11 +185,11 @@ class VMRecord(Base):
 
 class HostRecord(Base):
     __tablename__ = "hosts"
-
     id = Column(Integer, primary_key=True, autoincrement=True)
     hostname = Column(String(255), unique=True, nullable=False)
     ip = Column(String(50), unique=True, nullable=False)
     role = Column(String(50), default="worker")
+    zone_id = Column(String(64), nullable=True)
     total_vcpus = Column(Integer, default=8)
     total_ram_mb = Column(Integer, default=8192)
     total_disk_gb = Column(Integer, default=100)
@@ -138,9 +215,9 @@ class HostRecord(Base):
 
 class LogEntry(Base):
     __tablename__ = "logs"
-
     id = Column(Integer, primary_key=True, autoincrement=True)
     slice_id = Column(String(64), nullable=True)
+    user_id = Column(String(64), nullable=True)
     module = Column(String(100), nullable=False)
     level = Column(String(20), default="INFO")
     message = Column(Text, nullable=False)
@@ -148,7 +225,7 @@ class LogEntry(Base):
 
 
 # =============================================================
-# Database Manager
+# Database Manager (v2 + RBAC)
 # =============================================================
 
 class DatabaseManager:
@@ -165,6 +242,66 @@ class DatabaseManager:
 
     def get_session(self) -> Session:
         return self.Session()
+
+    # ---- User operations (RBAC) ----
+
+    def save_user(self, user: User):
+        session = self.get_session()
+        try:
+            record = UserRecord(
+                id=user.id,
+                username=user.username,
+                password_hash=user.password_hash,
+                role=user.role.value,
+                email=user.email,
+                is_active=int(user.is_active),
+                max_vcpus=user.max_vcpus,
+                max_ram_mb=user.max_ram_mb,
+                max_slices=user.max_slices,
+            )
+            session.merge(record)
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def get_user(self, user_id: str) -> Optional[User]:
+        session = self.get_session()
+        try:
+            record = session.query(UserRecord).filter_by(id=user_id).first()
+            return record.to_user() if record else None
+        finally:
+            session.close()
+
+    def get_user_by_username(self, username: str) -> Optional[User]:
+        session = self.get_session()
+        try:
+            record = session.query(UserRecord).filter_by(username=username).first()
+            return record.to_user() if record else None
+        finally:
+            session.close()
+
+    def list_users(self) -> List[dict]:
+        session = self.get_session()
+        try:
+            records = session.query(UserRecord).order_by(UserRecord.created_at.desc()).all()
+            return [r.to_user().to_dict() for r in records]
+        finally:
+            session.close()
+
+    def delete_user_record(self, user_id: str):
+        session = self.get_session()
+        try:
+            record = session.query(UserRecord).filter_by(id=user_id).first()
+            if record:
+                record.is_active = 0
+                session.commit()
+        except Exception as e:
+            session.rollback()
+        finally:
+            session.close()
 
     # ---- Slice operations ----
 
@@ -189,10 +326,8 @@ class DatabaseManager:
             )
             session.merge(record)
             session.commit()
-            logger.info("Slice %s saved to DB", slice_obj.name)
         except Exception as e:
             session.rollback()
-            logger.error("Failed to save slice: %s", e)
             raise
         finally:
             session.close()
@@ -205,27 +340,37 @@ class DatabaseManager:
         finally:
             session.close()
 
-    def list_slices(self) -> List[Slice]:
+    def list_slices(self, created_by: str = None, include_deleted: bool = False) -> List[Slice]:
         session = self.get_session()
         try:
-            records = session.query(SliceRecord).order_by(SliceRecord.created_at.desc()).all()
-            return [r.to_slice() for r in records]
+            q = session.query(SliceRecord).order_by(SliceRecord.created_at.desc())
+            if created_by:
+                q = q.filter_by(created_by=created_by)
+            records = q.all()
+            result = [r.to_slice() for r in records]
+            if not include_deleted:
+                result = [s for s in result if s.status != SliceStatus.DELETED]
+            return result
         finally:
             session.close()
 
+    def list_all_slices(self) -> List[Slice]:
+        return self.list_slices(include_deleted=True)
+
     def update_slice_status(self, slice_id: str, status: SliceStatus,
-                            error_message: str = None):
+                            error_message: str = None, num_vms: int = None):
         session = self.get_session()
         try:
             record = session.query(SliceRecord).filter_by(id=slice_id).first()
             if record:
                 record.status = status.value
                 record.error_message = error_message
+                if num_vms is not None:
+                    record.num_vms = num_vms
                 record.updated_at = datetime.utcnow()
                 session.commit()
         except Exception as e:
             session.rollback()
-            logger.error("Failed to update slice status: %s", e)
         finally:
             session.close()
 
@@ -239,7 +384,6 @@ class DatabaseManager:
                 session.commit()
         except Exception as e:
             session.rollback()
-            logger.error("Failed to mark slice as deleted: %s", e)
         finally:
             session.close()
 
@@ -270,25 +414,22 @@ class DatabaseManager:
             session.commit()
         except Exception as e:
             session.rollback()
-            logger.error("Failed to save VM: %s", e)
         finally:
             session.close()
 
     def get_vms_for_slice(self, slice_id: str) -> List[VM]:
         session = self.get_session()
         try:
-            records = session.query(VMRecord).filter_by(slice_id=slice_id).all()
+            records = session.query(VMRecord).filter_by(slice_id=slice_id).order_by(VMRecord.index).all()
             return [r.to_vm() for r in records]
         finally:
             session.close()
 
-    def update_vm_status(self, vm_id: str, status: VMStatus):
+    def delete_vm_record(self, vm_id: str):
         session = self.get_session()
         try:
-            record = session.query(VMRecord).filter_by(id=vm_id).first()
-            if record:
-                record.status = status.value
-                session.commit()
+            session.query(VMRecord).filter_by(id=vm_id).delete()
+            session.commit()
         except Exception as e:
             session.rollback()
         finally:
@@ -322,7 +463,6 @@ class DatabaseManager:
             session.commit()
         except Exception as e:
             session.rollback()
-            logger.error("Failed to save host: %s", e)
         finally:
             session.close()
 
@@ -334,16 +474,136 @@ class DatabaseManager:
         finally:
             session.close()
 
+    def update_host_resources(self, hostname: str, host_ip: str,
+                               total_vcpus: int, total_ram_mb: int,
+                               total_disk_gb: int, cpu_usage_pct: float = 0,
+                               used_ram_mb: int = 0, used_disk_gb: int = 0):
+        session = self.get_session()
+        try:
+            record = session.query(HostRecord).filter_by(hostname=hostname).first()
+            if record:
+                record.available_vcpus = max(0, total_vcpus - int(
+                    cpu_usage_pct / 100.0 * total_vcpus
+                ))
+                record.total_vcpus = total_vcpus
+                record.total_ram_mb = total_ram_mb
+                record.total_disk_gb = total_disk_gb
+                record.available_ram_mb = max(0, total_ram_mb - used_ram_mb)
+                record.available_disk_gb = max(0, total_disk_gb - used_disk_gb)
+            else:
+                record = HostRecord(
+                    hostname=hostname, ip=host_ip,
+                    total_vcpus=total_vcpus, total_ram_mb=total_ram_mb,
+                    total_disk_gb=total_disk_gb,
+                    available_vcpus=max(0, total_vcpus - int(
+                        cpu_usage_pct / 100.0 * total_vcpus
+                    )),
+                    available_ram_mb=max(0, total_ram_mb - used_ram_mb),
+                    available_disk_gb=max(0, total_disk_gb - used_disk_gb),
+                    is_active=1,
+                )
+                session.add(record)
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            logger.error("Failed to update host resources: %s", e)
+        finally:
+            session.close()
+
+    # ---- Image operations ----
+
+    def save_image(self, name: str, filename: str, path: str,
+                   format: str = "qcow2", size_gb: int = 2,
+                   uploaded_by: str = "admin") -> str:
+        import uuid
+        session = self.get_session()
+        try:
+            img_id = str(uuid.uuid4())[:8]
+            record = ImageRecord(
+                id=img_id, name=name, filename=filename, path=path,
+                format=format, size_gb=size_gb, uploaded_by=uploaded_by
+            )
+            session.add(record)
+            session.commit()
+            return img_id
+        finally:
+            session.close()
+
+    def list_images(self) -> List[dict]:
+        session = self.get_session()
+        try:
+            records = session.query(ImageRecord).filter_by(is_active=1).order_by(
+                ImageRecord.created_at.desc()
+            ).all()
+            return [r.to_dict() for r in records]
+        finally:
+            session.close()
+
+    def delete_image(self, image_id: str):
+        session = self.get_session()
+        try:
+            record = session.query(ImageRecord).filter_by(id=image_id).first()
+            if record:
+                record.is_active = 0
+                session.commit()
+        except Exception as e:
+            session.rollback()
+        finally:
+            session.close()
+
+    # ---- Template operations ----
+
+    def save_template(self, name: str, config: dict, description: str = "",
+                      created_by: str = "admin") -> str:
+        import uuid
+        session = self.get_session()
+        try:
+            tid = str(uuid.uuid4())[:8]
+            record = TemplateRecord(
+                id=tid, name=name, description=description,
+                config_json=json.dumps(config), created_by=created_by
+            )
+            session.add(record)
+            session.commit()
+            return tid
+        finally:
+            session.close()
+
+    def list_templates(self) -> List[dict]:
+        session = self.get_session()
+        try:
+            records = session.query(TemplateRecord).order_by(
+                TemplateRecord.created_at.desc()
+            ).all()
+            return [r.to_dict() for r in records]
+        finally:
+            session.close()
+
+    def get_template(self, template_id: str) -> Optional[dict]:
+        session = self.get_session()
+        try:
+            record = session.query(TemplateRecord).filter_by(id=template_id).first()
+            return record.to_dict() if record else None
+        finally:
+            session.close()
+
+    def delete_template(self, template_id: str):
+        session = self.get_session()
+        try:
+            session.query(TemplateRecord).filter_by(id=template_id).delete()
+            session.commit()
+        finally:
+            session.close()
+
     # ---- Log operations ----
 
-    def save_log(self, slice_id: str, module: str, level: str, message: str):
+    def save_log(self, slice_id: str, module: str, level: str, message: str,
+                 user_id: str = None):
         session = self.get_session()
         try:
             entry = LogEntry(
-                slice_id=slice_id,
-                module=module,
-                level=level,
-                message=message,
+                slice_id=slice_id, user_id=user_id,
+                module=module, level=level, message=message,
             )
             session.add(entry)
             session.commit()
@@ -357,9 +617,25 @@ class DatabaseManager:
         try:
             entries = session.query(LogEntry).filter_by(slice_id=slice_id).order_by(
                 LogEntry.created_at.desc()
-            ).limit(50).all()
+            ).limit(100).all()
             return [
                 {"module": e.module, "level": e.level, "message": e.message,
+                 "user_id": e.user_id,
+                 "created_at": e.created_at.isoformat()}
+                for e in entries
+            ]
+        finally:
+            session.close()
+
+    def get_all_logs(self, limit: int = 200) -> List[dict]:
+        session = self.get_session()
+        try:
+            entries = session.query(LogEntry).order_by(
+                LogEntry.created_at.desc()
+            ).limit(limit).all()
+            return [
+                {"slice_id": e.slice_id, "user_id": e.user_id,
+                 "module": e.module, "level": e.level, "message": e.message,
                  "created_at": e.created_at.isoformat()}
                 for e in entries
             ]

@@ -143,6 +143,64 @@ class LinuxDriver(BaseDriver):
     def get_console_token(self, vm: VM) -> Optional[str]:
         return vm.vnc_token
 
+    def get_host_resources(self, host_ip: str) -> dict:
+        """
+        Query real hardware resources from a remote Linux host via SSH.
+        Returns: {total_vcpus, total_ram_mb, total_disk_gb,
+                  used_vcpus_approx, used_ram_mb, used_disk_gb}
+        """
+        try:
+            client = self._connect(host_ip)
+
+            cpu_total = int(self._exec(client, "nproc").strip() or "1")
+
+            ram_raw = self._exec(
+                client,
+                "free -m | awk '/^Mem:/{print $2}'"
+            ).strip()
+            ram_total = int(ram_raw) if ram_raw.isdigit() else 8192
+
+            ram_used_raw = self._exec(
+                client,
+                "free -m | awk '/^Mem:/{print $3}'"
+            ).strip()
+            ram_used = int(ram_used_raw) if ram_used_raw.isdigit() else 0
+
+            disk_raw = self._exec(
+                client,
+                "df -BM / | tail -1 | awk '{print $2}' | sed 's/M//'"
+            ).strip()
+            disk_total_mb = int(disk_raw) if disk_raw.isdigit() else 100000
+            disk_total_gb = max(1, disk_total_mb // 1024)
+
+            disk_used_raw = self._exec(
+                client,
+                "df -BM / | tail -1 | awk '{print $3}' | sed 's/M//'"
+            ).strip()
+            disk_used_mb = int(disk_used_raw) if disk_used_raw.isdigit() else 0
+            disk_used_gb = max(0, disk_used_mb // 1024)
+
+            cpu_used_approx = int(
+                self._exec(
+                    client,
+                    "top -bn1 | grep 'Cpu(s)' | awk '{print $2}' | cut -d'%' -f1"
+                ).strip() or "0"
+            )
+
+            client.close()
+
+            return {
+                "total_vcpus": cpu_total,
+                "total_ram_mb": ram_total,
+                "total_disk_gb": disk_total_gb,
+                "used_ram_mb": ram_used,
+                "used_disk_gb": disk_used_gb,
+                "cpu_usage_pct": cpu_used_approx,
+            }
+        except Exception as e:
+            logger.error("Failed to query resources from %s: %s", host_ip, e)
+            return {}
+
     def _connect(self, host_ip: str) -> paramiko.SSHClient:
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
