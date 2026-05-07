@@ -224,6 +224,16 @@ class LogEntry(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class VLANPoolRecord(Base):
+    __tablename__ = "vlan_pool"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    vlan_id = Column(Integer, unique=True, nullable=False)
+    slice_id = Column(String(64), nullable=True)
+    subnet = Column(String(50), nullable=True)
+    in_use = Column(Integer, default=0)
+    assigned_at = Column(DateTime, default=datetime.utcnow)
+
+
 # =============================================================
 # Database Manager (v2 + RBAC)
 # =============================================================
@@ -639,5 +649,51 @@ class DatabaseManager:
                  "created_at": e.created_at.isoformat()}
                 for e in entries
             ]
+        finally:
+            session.close()
+
+    # ---- VLAN pool operations (auto-assign, no collision) ----
+
+    def assign_vlan(self, slice_id: str) -> dict:
+        """Auto-assign next free VLAN + /28 subnet from 10.60.3.0/24 (G2)."""
+        session = self.get_session()
+        try:
+            record = session.query(VLANPoolRecord).filter_by(in_use=0).order_by(
+                VLANPoolRecord.vlan_id
+            ).first()
+            if not record:
+                return {"success": False, "error": "No hay VLANs disponibles en el pool"}
+
+            used = session.query(VLANPoolRecord).filter_by(in_use=1).count()
+            subnet = f"10.60.3.{used * 16}/28"
+
+            record.in_use = 1
+            record.slice_id = slice_id
+            record.subnet = subnet
+            record.assigned_at = datetime.utcnow()
+            session.commit()
+            return {
+                "success": True,
+                "vlan_id": record.vlan_id,
+                "subnet": subnet,
+            }
+        except Exception as e:
+            session.rollback()
+            return {"success": False, "error": str(e)}
+        finally:
+            session.close()
+
+    def release_vlan(self, slice_id: str):
+        """Release VLAN back to pool when slice is deleted."""
+        session = self.get_session()
+        try:
+            record = session.query(VLANPoolRecord).filter_by(slice_id=slice_id).first()
+            if record:
+                record.in_use = 0
+                record.slice_id = None
+                record.subnet = None
+                session.commit()
+        except Exception as e:
+            session.rollback()
         finally:
             session.close()

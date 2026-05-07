@@ -161,6 +161,22 @@ CREATE TABLE IF NOT EXISTS orphan_resources (
 );
 
 -- =============================================================
+-- VLAN pool table (auto-assigned, prevents collisions)
+-- =============================================================
+CREATE TABLE IF NOT EXISTS vlan_pool (
+    id          INT AUTO_INCREMENT PRIMARY KEY,
+    vlan_id     INT          NOT NULL UNIQUE,
+    slice_id    VARCHAR(64)  DEFAULT NULL,
+    subnet      VARCHAR(50)  DEFAULT NULL,
+    in_use      TINYINT      DEFAULT 0,
+    assigned_at DATETIME     DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT IGNORE INTO vlan_pool (vlan_id, in_use) VALUES
+(300,0),(301,0),(302,0),(303,0),(304,0),(305,0),(306,0),(307,0),
+(308,0),(309,0),(310,0),(311,0),(312,0),(313,0),(314,0),(315,0);
+
+-- =============================================================
 -- Default data: admin user (password: admin123)
 -- Password hash: SHA256('admin123' + secret)
 -- =============================================================

@@ -53,7 +53,6 @@ class Orchestrator:
 
     def create_slice(self, name: str, topology: str, num_vms: int,
                      vcpus: int = 1, ram_mb: int = 512, disk_gb: int = 2,
-                     vlan_id: int = 300, subnet: str = "10.60.3.0/24",
                      enable_dhcp: bool = False, enable_internet: bool = False,
                      created_by: str = "admin") -> dict:
         try:
@@ -68,10 +67,20 @@ class Orchestrator:
         slice_obj = Slice(
             id="", name=name, topology=topo, num_vms=num_vms,
             vcpus_per_vm=vcpus, ram_mb_per_vm=ram_mb, disk_gb_per_vm=disk_gb,
-            vlan_id=vlan_id, subnet=subnet,
             enable_dhcp=enable_dhcp, enable_internet=enable_internet,
             status=SliceStatus.CREATING, created_by=created_by,
         )
+
+        # Auto-assign VLAN and subnet (R5.3 + R1C.3 + R1.5)
+        vlan_result = self.db.assign_vlan(slice_obj.id)
+        if not vlan_result["success"]:
+            slice_obj.status = SliceStatus.ERROR
+            slice_obj.error_message = vlan_result.get("error", "No VLAN available")
+            self.db.save_slice(slice_obj)
+            return {"success": False, "error": vlan_result.get("error")}
+
+        slice_obj.vlan_id = vlan_result["vlan_id"]
+        slice_obj.subnet = vlan_result["subnet"]
 
         vms = []
         for i in range(num_vms):
@@ -86,6 +95,7 @@ class Orchestrator:
             slice_obj.status = SliceStatus.ERROR
             slice_obj.error_message = plan.error_message
             self.db.save_slice(slice_obj)
+            self.db.release_vlan(slice_obj.id)
             self.db.save_log(slice_obj.id, "orchestrator", "ERROR",
                              f"Placement failed: {plan.error_message}", user_id=created_by)
             return {"success": False, "error": plan.error_message}
@@ -95,16 +105,19 @@ class Orchestrator:
 
         created_vms = self.slice_manager.create_slice(slice_obj)
         if not created_vms:
+            self.db.release_vlan(slice_obj.id)
             return {"success": False, "error": "Fallo en despliegue del slice"}
 
         links = Topology.get_links(topo, num_vms)
         self.db.save_log(slice_obj.id, "orchestrator", "INFO",
-                         f"Slice '{name}' creado: {num_vms} VMs, topologia={topology}, links={links}",
+                         f"Slice '{name}' creado: {num_vms} VMs, VLAN={slice_obj.vlan_id}, "
+                         f"subnet={slice_obj.subnet}, topologia={topology}",
                          user_id=created_by)
 
         return {
             "success": True, "slice_id": slice_obj.id, "name": slice_obj.name,
             "topology": topology, "num_vms": num_vms,
+            "vlan_id": slice_obj.vlan_id, "subnet": slice_obj.subnet,
             "vms": [vm.to_dict() for vm in created_vms], "links": links,
         }
 
@@ -150,8 +163,9 @@ class Orchestrator:
         for vm in vms:
             self.placement_engine.release_vm(vm)
         success = self.slice_manager.delete_slice(slice_id)
+        self.db.release_vlan(slice_id)
         self.db.save_log(slice_id, "orchestrator", "INFO",
-                         f"Slice eliminado por {user.username if user else 'system'}",
+                         f"Slice eliminado, VLAN liberada",
                          user_id=user.id if user else None)
         return {"success": success, "slice_id": slice_id}
 
@@ -213,8 +227,6 @@ class Orchestrator:
             vcpus=template_data.get("vcpus_per_vm", 1),
             ram_mb=template_data.get("ram_mb_per_vm", 512),
             disk_gb=template_data.get("disk_gb_per_vm", 2),
-            vlan_id=template_data.get("vlan_id", 300),
-            subnet=template_data.get("subnet", "10.60.3.0/24"),
             enable_dhcp=template_data.get("enable_dhcp", False),
             enable_internet=template_data.get("enable_internet", False),
             created_by=created_by,

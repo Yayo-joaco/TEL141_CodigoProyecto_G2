@@ -206,8 +206,6 @@ def create_slice():
         vcpus = int(request.form.get("vcpus", "1"))
         ram_mb = int(request.form.get("ram_mb", "512"))
         disk_gb = int(request.form.get("disk_gb", "2"))
-        vlan_id = int(request.form.get("vlan_id", "300"))
-        subnet = request.form.get("subnet", "10.60.3.0/24")
         enable_dhcp = request.form.get("enable_dhcp") == "on"
         enable_internet = request.form.get("enable_internet") == "on"
 
@@ -218,13 +216,13 @@ def create_slice():
         result = orch.create_slice(
             name=name, topology=topology, num_vms=num_vms,
             vcpus=vcpus, ram_mb=ram_mb, disk_gb=disk_gb,
-            vlan_id=vlan_id, subnet=subnet,
             enable_dhcp=enable_dhcp, enable_internet=enable_internet,
             created_by=session.get("username", "admin"),
         )
 
         if result["success"]:
-            flash(f"Slice '{name}' creado con {num_vms} VMs", "success")
+            flash(f"Slice '{name}' creado: {num_vms} VMs, VLAN={result.get('vlan_id','?')}, "
+                  f"subnet={result.get('subnet','?')}", "success")
         else:
             flash(result.get("error", "Error al crear slice"), "error")
     except Exception as e:
@@ -356,8 +354,6 @@ def save_template_route():
             "vcpus_per_vm": int(request.form.get("vcpus", "1")),
             "ram_mb_per_vm": int(request.form.get("ram_mb", "512")),
             "disk_gb_per_vm": int(request.form.get("disk_gb", "2")),
-            "vlan_id": int(request.form.get("vlan_id", "300")),
-            "subnet": request.form.get("subnet", "10.60.3.0/24"),
             "enable_dhcp": request.form.get("enable_dhcp") == "on",
             "enable_internet": request.form.get("enable_internet") == "on",
         }
