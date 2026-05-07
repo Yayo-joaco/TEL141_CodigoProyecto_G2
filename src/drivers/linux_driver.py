@@ -75,7 +75,7 @@ class LinuxDriver(BaseDriver):
                 f"-drive file={vm_disk},if=virtio,format=qcow2 "
                 f"-netdev tap,id=net0,ifname={vm.tap_interface},script=no,downscript=no "
                 f"-device virtio-net-pci,netdev=net0,mac={mac_addr} "
-                f"-vnc 0.0.0.0:{vnc_display},websocket={vm.vnc_ws_port} "
+                f"-vnc 0.0.0.0:{vnc_display} "
                 f"-daemonize "
                 f"-enable-kvm"
             )
@@ -93,6 +93,12 @@ class LinuxDriver(BaseDriver):
                             vm_name, host_ip, vm.qemu_pid, vm.vnc_port)
 
                 self._exec(client, f"sudo ovs-vsctl add-port {self.OVS_BRIDGE} {vm.tap_interface}")
+
+                vnc_raw = 5900 + vnc_display
+                self._exec(client,
+                           f"sudo nohup websockify {vm.vnc_ws_port} 127.0.0.1:{vnc_raw} "
+                           f">/dev/null 2>&1 &")
+                logger.info("websockify started on port %d -> 127.0.0.1:%d", vm.vnc_ws_port, vnc_raw)
             else:
                 vm.status = VMStatus.ERROR
                 vm.error_message = "QEMU process not found after start"
@@ -119,6 +125,9 @@ class LinuxDriver(BaseDriver):
             if vm.qemu_pid:
                 self._exec(client, f"sudo kill {vm.qemu_pid} 2>/dev/null")
                 time.sleep(1)
+
+            if vm.vnc_ws_port:
+                self._exec(client, f"sudo pkill -f 'websockify.*{vm.vnc_ws_port}' 2>/dev/null")
 
             if vm.tap_interface:
                 self._exec(client, f"sudo ovs-vsctl del-port {self.OVS_BRIDGE} {vm.tap_interface} 2>/dev/null")
