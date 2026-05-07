@@ -531,9 +531,11 @@ def ws_proxy(vm_id):
                 if data is None:
                     break
                 counter['b2r'] += 1
+                if isinstance(data, str):
+                    data = data.encode('utf-8')
                 if counter['b2r'] <= 2:
                     app.logger.debug("browser->worker msg#%d len=%d", counter['b2r'], len(data))
-                remote.send_binary(data) if isinstance(data, bytes) else remote.send(data)
+                remote.send_binary(data)
         except WebSocketError:
             app.logger.debug("browser->worker: WebSocket closed")
         except Exception as e:
@@ -551,6 +553,8 @@ def ws_proxy(vm_id):
                 if data is None:
                     break
                 counter['r2b'] += 1
+                if isinstance(data, str):
+                    data = data.encode('utf-8')
                 if counter['r2b'] <= 2:
                     app.logger.debug("worker->browser msg#%d len=%d", counter['r2b'], len(data))
                 wsock.send(data)
