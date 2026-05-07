@@ -248,7 +248,24 @@ class DatabaseManager:
 
     def _ensure_tables(self):
         Base.metadata.create_all(self.engine)
+        self._populate_vlan_pool()
         logger.info("Database tables verified/created")
+
+    def _populate_vlan_pool(self):
+        """Ensure VLAN pool has data (16 VLANs: 300-315)."""
+        session = self.Session()
+        try:
+            count = session.query(VLANPoolRecord).count()
+            if count == 0:
+                for vlan_id in range(300, 316):
+                    session.add(VLANPoolRecord(vlan_id=vlan_id, in_use=0))
+                session.commit()
+                logger.info("VLAN pool populated: VLANs 300-315")
+        except Exception as e:
+            session.rollback()
+            logger.warning("VLAN pool population skipped: %s", e)
+        finally:
+            session.close()
 
     def get_session(self) -> Session:
         return self.Session()

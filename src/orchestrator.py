@@ -77,6 +77,9 @@ class Orchestrator:
             slice_obj.status = SliceStatus.ERROR
             slice_obj.error_message = vlan_result.get("error", "No VLAN available")
             self.db.save_slice(slice_obj)
+            self.db.save_log(slice_obj.id, "orchestrator", "ERROR",
+                             f"VLAN assignment failed: {vlan_result.get('error')}",
+                             user_id=created_by)
             return {"success": False, "error": vlan_result.get("error")}
 
         slice_obj.vlan_id = vlan_result["vlan_id"]

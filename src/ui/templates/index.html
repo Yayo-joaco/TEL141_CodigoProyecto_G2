@@ -5,12 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PUCP Cloud Orchestrator - Grupo 2</title>
     <link rel="stylesheet" href="/static/style.css">
+    <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
     <style>
         .tabs { display: flex; gap: 0; margin-bottom: 0; }
         .tab { padding: 10px 20px; border: 1px solid #1e3742; border-bottom: none; border-radius: 6px 6px 0 0; background: #1a2e3a; cursor: pointer; color: #8ab4d8; font-size: 13px; }
         .tab.active { background: #162430; color: #4db8ff; font-weight: bold; }
         .tab-content { display: none; }
         .tab-content.active { display: block; }
+        #preview-canvas { width: 100%; height: 300px; background:#0f1923; border-radius:8px; }
     </style>
 </head>
 <body>
@@ -128,7 +130,7 @@
             <div>
                 <div class="card">
                     <h2>🔍 Vista previa: <span id="topo-name">Lineal</span></h2>
-                    <div class="topology-preview" id="topology-preview">VM1 --- VM2 --- VM3 --- VM4</div>
+                    <div id="preview-canvas"></div>
                 </div>
                 <div class="card">
                     <h2>🖥 Servidores
@@ -211,18 +213,46 @@
         event.target.classList.add('active');
         document.getElementById('tab-' + name).classList.add('active');
     }
+
+    var previewNet = null;
     function updatePreview() {
-        const topo = document.getElementById('topology').value;
-        const n = parseInt(document.getElementById('num_vms').value) || 4;
-        let preview = '';
+        var topo = document.getElementById('topology').value;
+        var n = parseInt(document.getElementById('num_vms').value) || 4;
         document.getElementById('topo-name').textContent = topo.charAt(0).toUpperCase() + topo.slice(1);
-        if (topo === 'lineal') { for (let i = 1; i <= n; i++) { preview += 'VM' + i; if (i < n) preview += ' --- '; } }
-        else if (topo === 'anillo') { preview += '  VM1'; for (let i = 2; i <= n; i++) preview += ' --- VM' + i; preview += '\n   |' + ' '.repeat((n-1)*8) + '|\n   +' + '-'.repeat((n-1)*8) + '+'; }
-        else if (topo === 'malla') { preview = 'Todos contra todos (' + (n*(n-1)/2) + ' enlaces)'; }
-        else if (topo === 'arbol') { preview = 'Árbol binario con ' + n + ' nodos'; }
-        else if (topo === 'bus') { for (let i = 2; i <= n; i++) preview += 'VM1 --- VM' + i + '\n'; }
-        document.getElementById('topology-preview').textContent = preview;
+
+        var container = document.getElementById('preview-canvas');
+        var nodes = [];
+        for (var i = 0; i < n; i++) {
+            nodes.push({ id: i, label: 'VM' + (i+1), shape: 'box',
+                color: { background: '#1a4d6e', border: '#4db8ff' },
+                font: { color: '#4db8ff', size: 13, face: 'monospace', bold: { color: '#fff' } },
+                margin: { top: 6, bottom: 6, left: 12, right: 12 }, borderWidth: 2 });
+        }
+        var edges = [];
+        if (topo === 'lineal') { for (var i = 0; i < n - 1; i++) edges.push({ from: i, to: i + 1, color: '#2a6f97', width: 2 }); }
+        else if (topo === 'anillo') { for (var i = 0; i < n - 1; i++) edges.push({ from: i, to: i + 1, color: '#2a6f97', width: 2 }); if (n > 1) edges.push({ from: n - 1, to: 0, color: '#2a6f97', width: 2 }); }
+        else if (topo === 'malla') { for (var i = 0; i < n; i++) for (var j = i + 1; j < n; j++) edges.push({ from: i, to: j, color: '#2a6f97', width: 1 }); }
+        else if (topo === 'arbol') { for (var i = 1; i < n; i++) edges.push({ from: Math.floor((i-1)/2), to: i, color: '#2a6f97', width: 2 }); }
+        else if (topo === 'bus') { for (var i = 1; i < n; i++) edges.push({ from: 0, to: i, color: '#2a6f97', width: 2 }); }
+
+        var data = { nodes: new vis.DataSet(nodes), edges: new vis.DataSet(edges) };
+        var opts = {
+            physics: { enabled: true, solver: 'forceAtlas2Based', forceAtlas2Based: { gravitationalConstant: -60, centralGravity: 0.005, springLength: 150, springConstant: 0.08, damping: 0.4 }, stabilization: { iterations: 150 } },
+            interaction: { hover: true, tooltipDelay: 100 },
+            edges: { smooth: { type: 'continuous', roundness: 0.2 } },
+        };
+        if (topo === 'arbol') {
+            opts.layout = { hierarchical: { enabled: true, levelSeparation: 60, nodeSpacing: 80, direction: 'UD', sortMethod: 'directed' } };
+            opts.physics = false;
+        }
+
+        if (previewNet) { previewNet.destroy(); }
+        previewNet = new vis.Network(container, data, opts);
+        setTimeout(function() { if(previewNet) previewNet.fit({ animation: { duration: 500 } }); }, 300);
     }
+
+    // Init preview on load
+    window.addEventListener('DOMContentLoaded', function() { updatePreview(); });
     </script>
 </body>
 </html>

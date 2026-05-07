@@ -5,6 +5,49 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Slice {{ slice.name }} - PUCP Cloud Orchestrator</title>
     <link rel="stylesheet" href="/static/style.css">
+    <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+    <style>
+        #topology-container {
+            width: 100%;
+            height: 420px;
+            background: #0f1923;
+            border-radius: 8px;
+            position: relative;
+        }
+        #vm-tooltip {
+            display: none;
+            position: absolute;
+            background: #162430;
+            border: 1px solid #2a6f97;
+            border-radius: 8px;
+            padding: 14px 18px;
+            z-index: 100;
+            pointer-events: none;
+            font-size: 12px;
+            color: #ccc;
+            min-width: 200px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+        }
+        #vm-tooltip h4 {
+            color: #4db8ff;
+            margin-bottom: 6px;
+            font-size: 13px;
+        }
+        #vm-tooltip code {
+            font-size: 10px;
+            color: #4db8ff;
+            word-break: break-all;
+        }
+        .topo-legend {
+            display: flex;
+            gap: 16px;
+            margin-bottom: 10px;
+            font-size: 11px;
+            color: #8ab4d8;
+        }
+        .topo-legend span { display: flex; align-items: center; gap: 6px; }
+        .legend-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+    </style>
 </head>
 <body>
     <div class="header">
@@ -49,7 +92,23 @@
             </div>
         </div>
 
-        <!-- EDIT SLICE FORM -->
+        <!-- TOPOLOGY VISUALIZATION (vis-network) -->
+        <div class="card">
+            <h2>🔗 Topología {{ slice.topology | capitalize }}
+                <span style="float:right;font-size:11px;color:#8ab4d8;">VMs: {{ slice.num_vms }} | VLAN: {{ slice.vlan_id }} | Subred: {{ slice.subnet }}</span>
+            </h2>
+            <div class="topo-legend">
+                <span><span class="legend-dot" style="background:#4db8ff;"></span> Activo</span>
+                <span><span class="legend-dot" style="background:#e05050;"></span> Error</span>
+                <span><span class="legend-dot" style="background:#888;"></span> Pendiente</span>
+                <span style="margin-left:auto;">🖱 Arrastra nodos | 🖱 Scroll = zoom | 🖱 Click nodo = detalles</span>
+            </div>
+            <div id="topology-container">
+                <div id="vm-tooltip"></div>
+            </div>
+        </div>
+
+        <!-- EDIT SLICE -->
         <div class="card">
             <h2>✏️ Editar Slice</h2>
             <form method="POST" action="/edit/{{ slice.id }}">
@@ -149,5 +208,166 @@
     </div>
 
     <div class="footer">PUCP Cloud Orchestrator - TEL141 2026-1 - Grupo 2</div>
+
+    <script>
+    (function() {
+        var container = document.getElementById('topology-container');
+        var tooltip = document.getElementById('vm-tooltip');
+        if (!container) return;
+
+        var topology = '{{ slice.topology }}';
+        var numVms = {{ slice.num_vms }};
+        var vms = {{ vms | tojson | safe }};
+
+        var statusColors = {
+            'active':    { bg: '#1a4d6e', border: '#4db8ff', font: '#4db8ff' },
+            'creating':  { bg: '#6e4a1a', border: '#ff8c42', font: '#ff8c42' },
+            'pending':   { bg: '#2a2a2a', border: '#888888', font: '#aaaaaa' },
+            'error':     { bg: '#6e1a1a', border: '#e05050', font: '#e05050' },
+            'deleting':  { bg: '#5a1a1a', border: '#cc4444', font: '#cc4444' },
+        };
+
+        var nodes = [];
+        for (var i = 0; i < numVms; i++) {
+            var vm = vms[i] || {};
+            var st = statusColors[vm.status] || statusColors['pending'];
+            nodes.push({
+                id: i,
+                label: vm.name || ('VM' + (i+1)),
+                title: '',  // custom tooltip via HTML
+                color: { background: st.bg, border: st.border, highlight: { border: '#fff', background: st.bg } },
+                font: { color: st.font, size: 13, face: 'monospace', bold: { color: '#fff' } },
+                value: vm.index || i,
+                shape: 'box',
+                margin: { top: 8, bottom: 8, left: 14, right: 14 },
+                borderWidth: 2,
+                vmData: vm,
+            });
+        }
+
+        var edges = [];
+        if (topology === 'lineal') {
+            for (var i = 0; i < numVms - 1; i++) edges.push({ from: i, to: i + 1, color: '#2a6f97', width: 2 });
+        } else if (topology === 'anillo') {
+            for (var i = 0; i < numVms - 1; i++) edges.push({ from: i, to: i + 1, color: '#2a6f97', width: 2 });
+            if (numVms > 1) edges.push({ from: numVms - 1, to: 0, color: '#2a6f97', width: 2 });
+        } else if (topology === 'malla') {
+            for (var i = 0; i < numVms; i++)
+                for (var j = i + 1; j < numVms; j++)
+                    edges.push({ from: i, to: j, color: '#2a6f97', width: 1.2 });
+        } else if (topology === 'arbol') {
+            for (var i = 1; i < numVms; i++)
+                edges.push({ from: Math.floor((i - 1) / 2), to: i, color: '#2a6f97', width: 2 });
+        } else if (topology === 'bus') {
+            for (var i = 1; i < numVms; i++)
+                edges.push({ from: 0, to: i, color: '#2a6f97', width: 2 });
+        }
+
+        var layoutOpts = {};
+        if (topology === 'lineal') {
+            layoutOpts = { randomSeed: 1 };
+        } else if (topology === 'anillo' || topology === 'malla' || topology === 'bus') {
+            layoutOpts = { randomSeed: 1 };
+        } else if (topology === 'arbol') {
+            layoutOpts = {
+                hierarchical: {
+                    enabled: true,
+                    levelSeparation: 70,
+                    nodeSpacing: 100,
+                    treeSpacing: 100,
+                    direction: 'UD',
+                    sortMethod: 'directed',
+                }
+            };
+        }
+
+        var data = { nodes: new vis.DataSet(nodes), edges: new vis.DataSet(edges) };
+        var options = {
+            layout: layoutOpts,
+            physics: {
+                enabled: true,
+                solver: 'forceAtlas2Based',
+                forceAtlas2Based: {
+                    gravitationalConstant: -80,
+                    centralGravity: 0.005,
+                    springLength: 180,
+                    springConstant: 0.08,
+                    damping: 0.4,
+                },
+                stabilization: { iterations: 200 },
+            },
+            interaction: {
+                hover: true,
+                tooltipDelay: 100,
+                navigationButtons: false,
+                keyboard: false,
+            },
+            edges: {
+                smooth: { type: 'continuous', roundness: 0.2 },
+                arrows: undefined,
+            },
+            nodes: {
+                borderWidth: 2,
+                shadow: { enabled: true, color: 'rgba(0,0,0,0.4)', size: 6 },
+            },
+        };
+
+        if (topology === 'arbol') {
+            options.physics = false;
+        }
+
+        var network = new vis.Network(container, data, options);
+
+        // Click on node: scroll to VM in table
+        network.on('click', function(params) {
+            if (params.nodes.length > 0) {
+                var nodeId = params.nodes[0];
+                var vm = vms[nodeId];
+                if (vm) {
+                    var vmName = vm.name || ('VM' + (nodeId+1));
+                    // Highlight row
+                    var rows = document.querySelectorAll('table tbody tr');
+                    rows.forEach(function(r) { r.style.background = ''; });
+                    if (rows[nodeId]) rows[nodeId].style.background = '#1a3a4a';
+                    rows[nodeId].scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+            }
+        });
+
+        // Hover: show tooltip
+        network.on('hoverNode', function(params) {
+            var vm = vms[params.node];
+            if (!vm) { tooltip.style.display = 'none'; return; }
+            var pos = network.canvasToDOM({ x: params.event.center.x, y: params.event.center.y });
+            var hostIp = vm.host_ip || '—';
+            var vncPort = vm.vnc_port || '—';
+            var vncToken = vm.vnc_token || '—';
+            var mac = vm.mac_address || '—';
+            tooltip.innerHTML =
+                '<h4>' + vm.name + '</h4>' +
+                '<strong>Status:</strong> <span class="status-' + vm.status + '">' + vm.status + '</span><br>' +
+                '<strong>Host:</strong> ' + hostIp + '<br>' +
+                '<strong>vCPUs:</strong> ' + (vm.vcpus||'—') + ' | <strong>RAM:</strong> ' + (vm.ram_mb||'—') + 'MB<br>' +
+                '<strong>MAC:</strong> <code>' + mac + '</code><br>' +
+                '<strong>VNC Port:</strong> ' + vncPort + '<br>' +
+                '<strong>Token:</strong> <code>' + vncToken + '</code>';
+            tooltip.style.display = 'block';
+            tooltip.style.left = Math.min(pos.x + 18, container.clientWidth - 220) + 'px';
+            tooltip.style.top = Math.max(pos.y - 80, 10) + 'px';
+        });
+
+        network.on('blurNode', function() {
+            tooltip.style.display = 'none';
+        });
+
+        // Fit initial view
+        network.once('stabilizationIterationsDone', function() {
+            network.fit({ animation: { duration: 800, easingFunction: 'easeInOutQuad' } });
+        });
+        if (topology === 'arbol') {
+            setTimeout(function() { network.fit({ animation: true }); }, 500);
+        }
+    })();
+    </script>
 </body>
 </html>

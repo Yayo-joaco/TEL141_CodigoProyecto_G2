@@ -169,7 +169,7 @@ class SliceManager:
         return [s.to_dict() for s in slices]
 
     def list_all_slices_admin(self) -> List[dict]:
-        slices = self.db.list_all_slices()
+        slices = self.db.list_slices(include_deleted=False)
         return [s.to_dict() for s in slices]
 
     def get_hosts_status(self) -> List[dict]:
