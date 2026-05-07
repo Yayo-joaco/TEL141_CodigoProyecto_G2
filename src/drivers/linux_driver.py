@@ -51,14 +51,14 @@ class LinuxDriver(BaseDriver):
 
             vm_disk = f"{self.VM_BASE_DIR}/{vm_name}/{vm_name}.qcow2"
             self._exec(client, (
-                f"qemu-img create -f qcow2 -b {base_image_path} "
+                f"sudo qemu-img create -f qcow2 -b {base_image_path} "
                 f"-F qcow2 {vm_disk} {disk_gb}G"
             ))
 
             vm.tap_interface = f"tap-{vm_name}"
-            self._exec(client, f"ip tuntap add mode tap {vm.tap_interface}")
-            self._exec(client, f"ip link set {vm.tap_interface} up")
-            self._exec(client, f"ovs-vsctl add-port {self.OVS_BRIDGE} {vm.tap_interface}")
+            self._exec(client, f"sudo ip tuntap add mode tap {vm.tap_interface}")
+            self._exec(client, f"sudo ip link set {vm.tap_interface} up")
+            self._exec(client, f"sudo ovs-vsctl add-port {self.OVS_BRIDGE} {vm.tap_interface}")
 
             vm.vnc_port = self.vnc_base_port + vm.index
             vm.vnc_token = str(uuid.uuid4())[:12]
@@ -66,7 +66,7 @@ class LinuxDriver(BaseDriver):
             mac_addr = self._gen_mac(vm.index)
 
             qemu_cmd = (
-                f"qemu-system-x86_64 "
+                f"sudo qemu-system-x86_64 "
                 f"-name {vm_name} "
                 f"-m {ram_mb} "
                 f"-smp {vcpus} "
@@ -82,7 +82,7 @@ class LinuxDriver(BaseDriver):
 
             time.sleep(2)
 
-            pid_out = self._exec(client, f"pgrep -f 'qemu-system-x86_64.*-name {vm_name}'")
+            pid_out = self._exec(client, f"sudo pgrep -f 'qemu-system-x86_64.*-name {vm_name}'")
             if pid_out.strip():
                 vm.qemu_pid = int(pid_out.strip().split('\n')[0])
                 vm.mac_address = mac_addr
@@ -113,12 +113,12 @@ class LinuxDriver(BaseDriver):
             client = self._connect(host_ip)
 
             if vm.qemu_pid:
-                self._exec(client, f"kill {vm.qemu_pid} 2>/dev/null")
+                self._exec(client, f"sudo kill {vm.qemu_pid} 2>/dev/null")
                 time.sleep(1)
 
             if vm.tap_interface:
-                self._exec(client, f"ovs-vsctl del-port {self.OVS_BRIDGE} {vm.tap_interface} 2>/dev/null")
-                self._exec(client, f"ip link delete {vm.tap_interface} 2>/dev/null")
+                self._exec(client, f"sudo ovs-vsctl del-port {self.OVS_BRIDGE} {vm.tap_interface} 2>/dev/null")
+                self._exec(client, f"sudo ip link delete {vm.tap_interface} 2>/dev/null")
 
             self._exec(client, f"rm -rf {self.VM_BASE_DIR}/{vm_name}")
 
@@ -134,7 +134,7 @@ class LinuxDriver(BaseDriver):
     def get_vm_status(self, vm: VM) -> Optional[str]:
         try:
             client = self._connect(vm.host_ip)
-            out = self._exec(client, f"pgrep -f 'qemu-system-x86_64.*-name {vm.name}'")
+            out = self._exec(client, f"sudo pgrep -f 'qemu-system-x86_64.*-name {vm.name}'")
             client.close()
             return VMStatus.ACTIVE.value if out.strip() else VMStatus.DELETED.value
         except Exception:

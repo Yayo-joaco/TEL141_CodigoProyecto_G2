@@ -79,7 +79,7 @@ class NetworkManager:
                 if vm.tap_interface and vm.host_ip:
                     client = self._connect(vm.host_ip)
                     self._exec(client,
-                               f"ovs-vsctl del-port {self.OVS_BRIDGE} {vm.tap_interface} 2>/dev/null")
+                               f"sudo ovs-vsctl del-port {self.OVS_BRIDGE} {vm.tap_interface} 2>/dev/null")
                     client.close()
             if hosts_involved and vlan_id:
                 self._cleanup_dhcp(hosts_involved[0], vlan_id)
@@ -105,31 +105,31 @@ class NetworkManager:
 
     def _ensure_bridge(self, host_ip: str):
         client = self._connect(host_ip)
-        out = self._exec(client, f"ovs-vsctl br-exists {self.OVS_BRIDGE}")
+        out = self._exec(client, f"sudo ovs-vsctl br-exists {self.OVS_BRIDGE}")
         if "true" not in out.lower():
-            self._exec(client, f"ovs-vsctl add-br {self.OVS_BRIDGE}")
+            self._exec(client, f"sudo ovs-vsctl add-br {self.OVS_BRIDGE}")
             logger.info("Created OVS bridge %s on %s", self.OVS_BRIDGE, host_ip)
         client.close()
 
     def _set_vlan(self, host_ip: str, tap_name: str, vlan_id: int):
         client = self._connect(host_ip)
-        cmd = f"ovs-vsctl set port {tap_name} tag={vlan_id} 2>/dev/null"
+        cmd = f"sudo ovs-vsctl set port {tap_name} tag={vlan_id} 2>/dev/null"
         self._exec(client, cmd)
         client.close()
 
     def _setup_dhcp(self, host_ip: str, vlan_id: int, subnet: str):
         client = self._connect(host_ip)
 
-        self._exec(client, f"ip netns add dnsmasq-vlan{vlan_id} 2>/dev/null")
+        self._exec(client, f"sudo ip netns add dnsmasq-vlan{vlan_id} 2>/dev/null")
 
         self._exec(client, (
-            f"ovs-vsctl add-port {self.OVS_BRIDGE} dhcp-vlan{vlan_id} "
+            f"sudo ovs-vsctl add-port {self.OVS_BRIDGE} dhcp-vlan{vlan_id} "
             f"-- set interface dhcp-vlan{vlan_id} type=internal "
             f" 2>/dev/null"
         ))
-        self._exec(client, f"ip link set dhcp-vlan{vlan_id} netns dnsmasq-vlan{vlan_id} 2>/dev/null")
-        self._exec(client, f"ip netns exec dnsmasq-vlan{vlan_id} ip link set dhcp-vlan{vlan_id} up")
-        self._exec(client, f"ip netns exec dnsmasq-vlan{vlan_id} ip addr add {subnet.split('.')[0]}.{subnet.split('.')[1]}.{subnet.split('.')[2]}.1/24 dev dhcp-vlan{vlan_id}")
+        self._exec(client, f"sudo ip link set dhcp-vlan{vlan_id} netns dnsmasq-vlan{vlan_id} 2>/dev/null")
+        self._exec(client, f"sudo ip netns exec dnsmasq-vlan{vlan_id} ip link set dhcp-vlan{vlan_id} up")
+        self._exec(client, f"sudo ip netns exec dnsmasq-vlan{vlan_id} ip addr add {subnet.split('.')[0]}.{subnet.split('.')[1]}.{subnet.split('.')[2]}.1/24 dev dhcp-vlan{vlan_id}")
 
         self._exec(client,
                    f"pkill -f 'dnsmasq.*dnsmasq-vlan{vlan_id}' 2>/dev/null")
@@ -150,18 +150,18 @@ class NetworkManager:
     def _setup_internet(self, host_ip: str, vlan_id: int):
         client = self._connect(host_ip)
         self._exec(client, (
-            f"iptables -t nat -A POSTROUTING "
-            f"-s {10}.{60}.{3}.0/24 "
-            f"-o eth0 -j MASQUERADE 2>/dev/null"
-        ))
-        self._exec(client, "sysctl -w net.ipv4.ip_forward=1 2>/dev/null")
+            f"sudo iptables -t nat -A POSTROUTING "
+                f"-s {10}.{60}.{3}.0/24 "
+                f"-o eth0 -j MASQUERADE 2>/dev/null"
+            ))
+            self._exec(client, "sudo sysctl -w net.ipv4.ip_forward=1 2>/dev/null")
         logger.info("Internet access enabled for VLAN %d", vlan_id)
         client.close()
 
     def _cleanup_dhcp(self, host_ip: str, vlan_id: int):
         client = self._connect(host_ip)
         self._exec(client, f"pkill -f 'dnsmasq.*dnsmasq-vlan{vlan_id}' 2>/dev/null")
-        self._exec(client, f"ip netns delete dnsmasq-vlan{vlan_id} 2>/dev/null")
+        self._exec(client, f"sudo ip netns delete dnsmasq-vlan{vlan_id} 2>/dev/null")
         client.close()
 
     def _connect(self, host_ip: str) -> paramiko.SSHClient:
