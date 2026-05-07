@@ -174,6 +174,7 @@ class VMRecord(Base):
             ip_address=self.ip_address,
             mac_address=self.mac_address,
             vnc_port=self.vnc_port,
+            vnc_ws_port=(self.vnc_port + 11000) if self.vnc_port else None,
             vnc_token=self.vnc_token,
             tap_interface=self.tap_interface,
             qemu_pid=self.qemu_pid,
@@ -449,6 +450,14 @@ class DatabaseManager:
         try:
             records = session.query(VMRecord).filter_by(slice_id=slice_id).order_by(VMRecord.index).all()
             return [r.to_vm() for r in records]
+        finally:
+            session.close()
+
+    def get_vm_by_id(self, vm_id: str) -> Optional[VM]:
+        session = self.get_session()
+        try:
+            record = session.query(VMRecord).filter_by(id=vm_id).first()
+            return record.to_vm() if record else None
         finally:
             session.close()
 

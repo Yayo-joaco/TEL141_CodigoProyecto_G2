@@ -221,6 +221,7 @@ def create_slice():
         )
 
         if result["success"]:
+            orch.refresh_hosts()
             flash(f"Slice '{name}' creado: {num_vms} VMs, VLAN={result.get('vlan_id','?')}, "
                   f"subnet={result.get('subnet','?')}", "success")
         else:
@@ -251,6 +252,8 @@ def edit_slice(slice_id):
             new_vcpus=new_vcpus, new_ram_mb=new_ram_mb,
             new_disk_gb=new_disk_gb,
         )
+        if result["success"]:
+            orch.refresh_hosts()
         flash(result.get("message", "Slice editado"), "success" if result["success"] else "error")
     except Exception as e:
         flash(f"Error: {e}", "error")
@@ -271,6 +274,17 @@ def view_slice(slice_id):
                            logs=logs, user_role=session.get("role"))
 
 
+@app.route("/console/<vm_id>")
+@login_required
+def console_vm(vm_id):
+    orch = get_orchestrator()
+    vm = orch.db.get_vm_by_id(vm_id)
+    if not vm:
+        flash("VM no encontrada", "error")
+        return redirect(url_for("index"))
+    return render_template("console.html", vm=vm.to_dict())
+
+
 @app.route("/delete/<slice_id>")
 @login_required
 def delete_slice(slice_id):
@@ -278,6 +292,8 @@ def delete_slice(slice_id):
     username = session.get("username", "")
     user_obj = orch.db.get_user_by_username(username)
     result = orch.delete_slice(slice_id, user=user_obj)
+    if result["success"]:
+        orch.refresh_hosts()
     flash("Slice eliminado" if result["success"] else result.get("error", "Error"), "success")
     return redirect(url_for("index"))
 

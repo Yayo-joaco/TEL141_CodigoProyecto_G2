@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Consola {{ vm.name }} - PUCP Cloud Orchestrator</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://unpkg.com/@novnc/novnc@1.5.0/core/rfb.js"></script>
+    <style>
+        body { margin: 0; background: #0a1620; color: #ccd6dd; }
+        .console-header {
+            background: #0d2130; border-bottom: 1px solid #2a4a5a;
+            padding: 8px 16px; display: flex; align-items: center; gap: 16px;
+            font-family: monospace; font-size: 13px;
+        }
+        .console-header a { color: #4db8ff; text-decoration: none; }
+        .console-header .badge { font-size: 10px; padding: 2px 8px; border-radius: 3px; }
+        .badge-active { background: #1a4d6e; color: #4db8ff; }
+        .badge-disconnected { background: #5a1a1a; color: #ff6b6b; }
+        .console-wrap {
+            display: flex; flex-direction: column; height: calc(100vh - 42px);
+            align-items: center; justify-content: center;
+        }
+        #noVNC_screen {
+            background: #000; border: 1px solid #2a4a5a;
+            max-width: 100%; max-height: 100%;
+        }
+        .console-bar {
+            background: #0d2130; border-top: 1px solid #2a4a5a;
+            padding: 6px 16px; font-size: 11px; font-family: monospace;
+            display: flex; gap: 20px;
+        }
+        .console-bar span { color: #6a8a9a; }
+        .console-bar strong { color: #4db8ff; }
+        .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+        .dot-connecting { background: #ffaa00; }
+        .dot-connected { background: #00cc66; }
+        .dot-error { background: #ff4444; }
+    </style>
+</head>
+<body>
+    <div class="console-header">
+        <a href="/slice/{{ vm.slice_id }}">&larr; Slice</a>
+        <span>|</span>
+        <strong>{{ vm.name }}</strong>
+        <span class="badge" id="status-badge">Conectando...</span>
+        <span style="margin-left:auto;color:#6a8a9a;">
+            {{ vm.host_ip }} :{{ vm.vnc_ws_port or '?' }}
+        </span>
+    </div>
+
+    <div class="console-wrap">
+        <div id="noVNC_screen">
+            <div id="noVNC_placeholder"
+                 style="padding:40px;text-align:center;color:#4db8ff;font-family:monospace;font-size:14px;">
+                Conectando a {{ vm.host_ip }}:{{ vm.vnc_ws_port }}...
+            </div>
+        </div>
+    </div>
+
+    <div class="console-bar">
+        <span>VM:</span><strong>{{ vm.name }}</strong>
+        <span>Host:</span><strong>{{ vm.host_ip }}</strong>
+        <span>WS:</span><strong>:{{ vm.vnc_ws_port }}</strong>
+        <span>Token:</span><code style="font-size:10px;color:#4db8ff;">{{ vm.vnc_token }}</code>
+        <span id="conn-status" style="margin-left:auto;">
+            <span class="status-dot dot-connecting"></span>Conectando...
+        </span>
+    </div>
+
+    <script>
+    (function() {
+        var wsUrl = 'ws://{{ vm.host_ip }}:{{ vm.vnc_ws_port }}';
+        var placeholder = document.getElementById('noVNC_placeholder');
+        var screenEl = document.getElementById('noVNC_screen');
+        var badge = document.getElementById('status-badge');
+        var connStatus = document.getElementById('conn-status');
+        var rfb = null;
+
+        function updateStatus(state, text) {
+            var dot = connStatus.querySelector('.status-dot') || connStatus;
+            connStatus.innerHTML = text;
+            if (state === 'connecting') {
+                connStatus.innerHTML = '<span class="status-dot dot-connecting"></span>' + text;
+                badge.textContent = 'Conectando...';
+                badge.className = 'badge badge-disconnected';
+            } else if (state === 'connected') {
+                connStatus.innerHTML = '<span class="status-dot dot-connected"></span>' + text;
+                badge.textContent = 'ACTIVO';
+                badge.className = 'badge badge-active';
+            } else {
+                connStatus.innerHTML = '<span class="status-dot dot-error"></span>' + text;
+                badge.textContent = 'ERROR';
+                badge.className = 'badge badge-disconnected';
+            }
+        }
+
+        function connectVNC() {
+            updateStatus('connecting', 'Conectando a ' + wsUrl + '...');
+
+            rfb = new RFB(screenEl, wsUrl, {
+                credentials: { password: '' },
+                shared: true,
+                viewOnly: false,
+                scaleViewport: true,
+                resizeSession: false,
+                qualityLevel: 6,
+                compressionLevel: 2,
+            });
+
+            rfb.addEventListener('connect', function() {
+                updateStatus('connected', 'Conectado a ' + wsUrl);
+                if (placeholder) placeholder.style.display = 'none';
+                rfb.focus();
+            });
+
+            rfb.addEventListener('disconnect', function(e) {
+                var msg = 'Desconectado';
+                if (e.detail && e.detail.clean) {
+                    msg = 'Conexion cerrada';
+                } else {
+                    msg = 'Error de conexion: ' + (e.detail ? e.detail.reason : 'timeout');
+                }
+                updateStatus('error', msg);
+                if (placeholder) placeholder.style.display = 'block';
+            });
+
+            rfb.addEventListener('credentialsrequired', function() {
+                rfb.sendCredentials({ password: '' });
+            });
+
+            rfb.addEventListener('desktopname', function(e) {
+                document.title = e.detail.name + ' - Consola';
+            });
+
+            rfb.viewportDrag = false;
+            rfb.viewportDraggable = false;
+        }
+
+        window.addEventListener('load', function() {
+            setTimeout(connectVNC, 500);
+        });
+
+        window.addEventListener('beforeunload', function() {
+            if (rfb) { try { rfb.disconnect(); } catch(e) {} }
+        });
+    })();
+    </script>
+</body>
+</html>

@@ -170,6 +170,9 @@
                             {% else %}—{% endif %}
                         </td>
                         <td>
+                            {% if vm.status == 'active' and vm.vnc_ws_port %}
+                            <a href="/console/{{ vm.id }}" target="_blank" class="btn btn-sm btn-primary" style="padding:2px 8px;background:#2a6f97;">&#9664;|&#9654;</a>
+                            {% endif %}
                             <a href="/edit/{{ slice.id }}?remove_vm={{ vm.id }}" class="btn btn-sm btn-danger" style="padding:2px 8px;">X</a>
                         </td>
                     </tr>
@@ -341,6 +344,7 @@
             var pos = network.canvasToDOM({ x: params.event.center.x, y: params.event.center.y });
             var hostIp = vm.host_ip || '—';
             var vncPort = vm.vnc_port || '—';
+            var vncWsPort = vm.vnc_ws_port || '—';
             var vncToken = vm.vnc_token || '—';
             var mac = vm.mac_address || '—';
             tooltip.innerHTML =
@@ -349,7 +353,7 @@
                 '<strong>Host:</strong> ' + hostIp + '<br>' +
                 '<strong>vCPUs:</strong> ' + (vm.vcpus||'—') + ' | <strong>RAM:</strong> ' + (vm.ram_mb||'—') + 'MB<br>' +
                 '<strong>MAC:</strong> <code>' + mac + '</code><br>' +
-                '<strong>VNC Port:</strong> ' + vncPort + '<br>' +
+                '<strong>VNC:</strong> ' + vncPort + ' (WS: ' + vncWsPort + ')<br>' +
                 '<strong>Token:</strong> <code>' + vncToken + '</code>';
             tooltip.style.display = 'block';
             tooltip.style.left = Math.min(pos.x + 18, container.clientWidth - 220) + 'px';

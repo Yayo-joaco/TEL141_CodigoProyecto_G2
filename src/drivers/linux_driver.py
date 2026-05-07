@@ -35,6 +35,7 @@ class LinuxDriver(BaseDriver):
     def __init__(self, ssh_key_path: str = "/home/ubuntu/.ssh/id_rsa"):
         self.ssh_key_path = ssh_key_path
         self.vnc_base_port = 6000
+        self.vnc_ws_base_port = 17000
 
     def create_vm(self, vm: VM, placement: PlacementDecision,
                   base_image_path: str) -> bool:
@@ -61,9 +62,11 @@ class LinuxDriver(BaseDriver):
             self._exec(client, f"sudo ovs-vsctl add-port {self.OVS_BRIDGE} {vm.tap_interface}")
 
             vm.vnc_port = self.vnc_base_port + vm.index
+            vm.vnc_ws_port = self.vnc_ws_base_port + vm.index
             vm.vnc_token = str(uuid.uuid4())[:12]
 
             mac_addr = self._gen_mac(vm.index)
+            vnc_display = vm.vnc_port - self.vnc_base_port
 
             qemu_cmd = (
                 f"sudo qemu-system-x86_64 "
@@ -73,7 +76,7 @@ class LinuxDriver(BaseDriver):
                 f"-drive file={vm_disk},if=virtio,format=qcow2 "
                 f"-netdev tap,id=net0,ifname={vm.tap_interface},script=no,downscript=no "
                 f"-device virtio-net-pci,netdev=net0,mac={mac_addr} "
-                f"-vnc 127.0.0.1:{vm.vnc_port - self.vnc_base_port} "
+                f"-vnc 0.0.0.0:{vnc_display},websocket={vm.vnc_ws_port} "
                 f"-daemonize "
                 f"-enable-kvm"
             )

@@ -31,6 +31,7 @@ class VM:
     ip_address: Optional[str] = None
     mac_address: Optional[str] = None
     vnc_port: Optional[int] = None
+    vnc_ws_port: Optional[int] = None
     vnc_token: Optional[str] = None
     tap_interface: Optional[str] = None
     qemu_pid: Optional[int] = None
@@ -55,6 +56,7 @@ class VM:
             "ip_address": self.ip_address,
             "mac_address": self.mac_address,
             "vnc_port": self.vnc_port,
+            "vnc_ws_port": self.vnc_ws_port,
             "vnc_token": self.vnc_token,
             "tap_interface": self.tap_interface,
             "status": self.status.value if isinstance(self.status, VMStatus) else self.status,
