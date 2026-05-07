@@ -154,7 +154,7 @@ class NetworkManager:
                 f"-s {10}.{60}.{3}.0/24 "
                 f"-o eth0 -j MASQUERADE 2>/dev/null"
             ))
-            self._exec(client, "sudo sysctl -w net.ipv4.ip_forward=1 2>/dev/null")
+        self._exec(client, "sudo sysctl -w net.ipv4.ip_forward=1 2>/dev/null")
         logger.info("Internet access enabled for VLAN %d", vlan_id)
         client.close()
 
