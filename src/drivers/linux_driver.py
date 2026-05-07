@@ -180,12 +180,12 @@ class LinuxDriver(BaseDriver):
             disk_used_mb = int(disk_used_raw) if disk_used_raw.isdigit() else 0
             disk_used_gb = max(0, disk_used_mb // 1024)
 
-            cpu_used_approx = int(
+            cpu_used_approx = int(float(
                 self._exec(
                     client,
                     "top -bn1 | grep 'Cpu(s)' | awk '{print $2}' | cut -d'%' -f1"
                 ).strip() or "0"
-            )
+            ))
 
             client.close()
 
