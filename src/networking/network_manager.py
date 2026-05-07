@@ -105,8 +105,12 @@ class NetworkManager:
 
     def _ensure_bridge(self, host_ip: str):
         client = self._connect(host_ip)
-        out = self._exec(client, f"sudo ovs-vsctl br-exists {self.OVS_BRIDGE}")
-        if "true" not in out.lower():
+        _, stdout, stderr = client.exec_command(
+            f"sudo ovs-vsctl br-exists {self.OVS_BRIDGE}", timeout=10
+        )
+        stdout.channel.recv_exit_status()
+        exit_code = stdout.channel.exit_status
+        if exit_code != 0:
             self._exec(client, f"sudo ovs-vsctl add-br {self.OVS_BRIDGE}")
             logger.info("Created OVS bridge %s on %s", self.OVS_BRIDGE, host_ip)
         client.close()
