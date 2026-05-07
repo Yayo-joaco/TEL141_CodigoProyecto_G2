@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Consola {{ vm.name }} - PUCP Cloud Orchestrator</title>
     <link rel="stylesheet" href="/static/style.css">
-    <script src="https://unpkg.com/@novnc/novnc@1.5.0/core/rfb.js"></script>
+
     <style>
         body { margin: 0; background: #0a1620; color: #ccd6dd; }
         .console-header {
@@ -68,10 +68,10 @@
         </span>
     </div>
 
-    <script>
-    (function() {
+    <script type="module">
+        import RFB from '/static/novnc/rfb.js';
+
         var wsUrl = 'ws://' + window.location.host + '/ws-proxy/{{ vm.id }}';
-        var directUrl = 'ws://{{ vm.host_ip }}:{{ vm.vnc_ws_port }}';
         var placeholder = document.getElementById('noVNC_placeholder');
         var screenEl = document.getElementById('noVNC_screen');
         var badge = document.getElementById('status-badge');
@@ -145,7 +145,6 @@
         window.addEventListener('beforeunload', function() {
             if (rfb) { try { rfb.disconnect(); } catch(e) {} }
         });
-    })();
     </script>
 </body>
 </html>
