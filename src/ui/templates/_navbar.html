@@ -12,7 +12,6 @@
             <a href="/crear-slice" class="site-nav-link {% if request.path == '/crear-slice' %}active{% endif %}">Crear Slice</a>
             <a href="/images" class="site-nav-link {% if request.path.startswith('/images') %}active{% endif %}">Imagenes</a>
             <a href="/admin/sessions" class="site-nav-link {% if request.path.startswith('/admin/sessions') %}active{% endif %}">Sesiones</a>
-            <span class="site-nav-disabled" title="Disponible en proximas versiones">Dashboard</span>
             {% else %}
             {# ── NAV USUARIO NORMAL ── #}
             <a href="/" class="site-nav-link {% if request.path == '/' %}active{% endif %}">Slices</a>
