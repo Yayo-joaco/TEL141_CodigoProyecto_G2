@@ -75,8 +75,11 @@ body {
     display: flex;
     align-items: center;
     gap: 10px;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;         /* evita que los items bajen de línea */
     justify-content: flex-end;
+    overflow-x: auto;          /* si en mobile no caben, permite scroll horizontal */
+    min-width: 0;
+    overflow: hidden;
 }
 
 .site-nav-link,
@@ -102,8 +105,8 @@ body {
 
 .site-nav-link.active {
     color: #4db8ff;
-    border-color: #2a6f97;
-    background: rgba(42, 111, 151, 0.18);
+    background: rgba(42, 111, 151, 0.12);
+    border-color: transparent;
 }
 
 .site-nav-disabled {
