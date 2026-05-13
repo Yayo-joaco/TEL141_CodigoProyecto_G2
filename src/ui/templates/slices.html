@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Admin Panel - PUCP Cloud Orchestrator</title>
+    <title>Slices - PUCP Cloud Orchestrator</title>
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -24,7 +24,7 @@
                     <h2>Slices creados</h2>
                     <p>Desde aqui puedes revisar, editar, exportar o borrar cada slice existente.</p>
                 </div>
-                <a href="/" class="btn btn-primary">Crear slice</a>
+                <a href="/crear-slice" class="btn btn-primary">Crear slice</a>
             </div>
             {% if all_slices %}
             <table class="slice-table">
@@ -63,7 +63,7 @@
                         <td class="slice-table-subtext">{{ s.created_at[:16] }}</td>
                         <td>
                             <div class="table-actions">
-                                <a href="/slice/{{ s.id }}" class="btn btn-sm btn-primary">Editar</a>
+                                <a href="/slice/{{ s.id }}" class="btn btn-sm btn-primary">Ver</a>
                                 <a href="/export-file/{{ s.id }}" class="btn btn-sm btn-primary">Exportar</a>
                                 <a href="/delete/{{ s.id }}" class="btn btn-sm btn-danger" onclick="return confirm('¿Borrar slice {{ s.name }}?')">Borrar</a>
                             </div>
@@ -76,7 +76,7 @@
             <div class="empty-state">
                 <h3>No hay slices creados todavía</h3>
                 <p>Cuando exista al menos uno, aparecerá aquí con sus datos y acciones de edición, exportación y borrado.</p>
-                <a href="/" class="btn btn-primary">Crear slice</a>
+                <a href="/crear-slice" class="btn btn-primary">Crear slice</a>
             </div>
             {% endif %}
         </div>

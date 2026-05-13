@@ -1,0 +1,40 @@
+<div class="site-navbar">
+    <div class="site-navbar-brand">
+        <a href="/" class="site-navbar-title">PUCP Cloud Orchestrator</a>
+        <span class="site-navbar-subtitle">Private Cloud Orchestrator - Grupo 2</span>
+    </div>
+
+    <div class="site-navbar-actions">
+        {% if session.get('user_id') %}
+            {% if session.get('role') == 'admin' %}
+            {# ── NAV ADMIN ── #}
+            <a href="/" class="site-nav-link {% if request.path == '/' %}active{% endif %}">Slices</a>
+            <a href="/crear-slice" class="site-nav-link {% if request.path == '/crear-slice' %}active{% endif %}">Crear Slice</a>
+            <a href="/images" class="site-nav-link {% if request.path.startswith('/images') %}active{% endif %}">Imagenes</a>
+            <a href="/admin/sessions" class="site-nav-link {% if request.path.startswith('/admin/sessions') %}active{% endif %}">Sesiones</a>
+            <span class="site-nav-disabled" title="Disponible en proximas versiones">Dashboard</span>
+            {% else %}
+            {# ── NAV USUARIO NORMAL ── #}
+            <a href="/" class="site-nav-link {% if request.path == '/' %}active{% endif %}">Slices</a>
+            <a href="/crear-slice" class="site-nav-button {% if request.path == '/crear-slice' %}active{% endif %}">Crear</a>
+            <a href="/images" class="site-nav-link {% if request.path.startswith('/images') %}active{% endif %}">Imagenes</a>
+            {% endif %}
+
+        <details class="site-user-menu">
+            <summary class="site-user-trigger">
+                <span class="badge">{{ session.get('username', 'usuario') }}</span>
+                <span class="site-user-caret">▾</span>
+            </summary>
+            <div class="site-user-panel">
+                <span>Conectado como</span>
+                <strong>{{ session.get('username', 'usuario') }}</strong>
+                <small>{{ session.get('role', 'user') | capitalize }}</small>
+                <a href="/logout" class="btn btn-danger btn-sm">Salir</a>
+            </div>
+        </details>
+        {% else %}
+        <a href="/login" class="site-nav-link">Iniciar sesion</a>
+        <a href="/register" class="site-nav-button">Registrarse</a>
+        {% endif %}
+    </div>
+</div>

@@ -7,22 +7,12 @@
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-    <div class="header">
-        <div>
-            <h1>🖼 Gestión de Imágenes</h1>
-            <span style="color:#8ab4d8;font-size:13px;">
-                <a href="/" style="color:#4db8ff;">← Volver</a>
-            </span>
-        </div>
-        <div>
-            <span class="badge">{{ user_role }}</span>
-        </div>
-    </div>
+    {% include "_navbar.html" %}
 
     <div class="container">
         {% if user_role == "admin" %}
         <div class="card">
-            <h2>📤 Importar Imagen</h2>
+            <h2>Importar Imagen</h2>
             <form method="POST" action="/import-image">
                 <div class="form-row">
                     <div class="form-group">
@@ -53,7 +43,7 @@
         {% endif %}
 
         <div class="card">
-            <h2>📦 Imágenes Disponibles</h2>
+            <h2>Imagenes Disponibles</h2>
             {% if images %}
             <table>
                 <thead>

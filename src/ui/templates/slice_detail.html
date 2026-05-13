@@ -50,19 +50,7 @@
     </style>
 </head>
 <body>
-    <div class="header">
-        <div>
-            <h1>☁ Slice: {{ slice.name }}</h1>
-            <span style="color:#8ab4d8;font-size:13px;">
-                <a href="/" style="color:#4db8ff;">← Dashboard</a> |
-                <a href="/export-file/{{ slice.id }}" style="color:#4db8ff;">⬇ Exportar JSON</a>
-            </span>
-        </div>
-        <div>
-            <span class="badge">{{ user_role or '' }}</span>
-            <a href="/logout" class="btn btn-sm btn-danger" style="margin-left:8px;">Salir</a>
-        </div>
-    </div>
+    {% include "_navbar.html" %}
 
     <div class="container">
         {% with messages = get_flashed_messages(with_categories=true) %}
@@ -73,9 +61,22 @@
         {% endif %}
         {% endwith %}
 
+        <!-- BACK BUTTON -->
+        <div style="margin-bottom:12px;">
+            {% if user_role == 'admin' %}
+            <a href="/slices" class="btn btn-sm btn-primary" style="display:inline-flex;align-items:center;gap:6px;">
+                ← Volver a Slices
+            </a>
+            {% else %}
+            <a href="/" class="btn btn-sm btn-primary" style="display:inline-flex;align-items:center;gap:6px;">
+                ← Volver al Dashboard
+            </a>
+            {% endif %}
+        </div>
+
         <!-- SLICE INFO -->
         <div class="card">
-            <h2>📋 Información del Slice</h2>
+            <h2>Informacion del Slice</h2>
             <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;font-size:13px;">
                 <div><strong>ID:</strong> {{ slice.id }}</div>
                 <div><strong>Topología:</strong> {{ slice.topology | capitalize }}</div>
@@ -94,7 +95,7 @@
 
         <!-- TOPOLOGY VISUALIZATION (vis-network) -->
         <div class="card">
-            <h2>🔗 Topología {{ slice.topology | capitalize }}
+            <h2>Topologia {{ slice.topology | capitalize }}
                 <span style="float:right;font-size:11px;color:#8ab4d8;">VMs: {{ slice.num_vms }} | VLAN: {{ slice.vlan_id }} | Subred: {{ slice.subnet }}</span>
             </h2>
             <div class="topo-legend">
@@ -109,8 +110,9 @@
         </div>
 
         <!-- EDIT SLICE -->
+        {% if can_manage_slice %}
         <div class="card">
-            <h2>✏️ Editar Slice</h2>
+            <h2>Editar Slice</h2>
             <form method="POST" action="/edit/{{ slice.id }}">
                 <div class="form-row">
                     <div class="form-group">
@@ -135,10 +137,11 @@
                 <button type="submit" class="btn btn-primary">Aplicar Cambios</button>
             </form>
         </div>
+        {% endif %}
 
         <!-- VMs TABLE -->
         <div class="card">
-            <h2>💻 Máquinas Virtuales ({{ vms | length }})</h2>
+            <h2>Maquinas Virtuales ({{ vms | length }})</h2>
             {% if vms %}
             <table>
                 <thead>
@@ -173,7 +176,9 @@
                             {% if vm.status == 'active' and vm.vnc_ws_port %}
                             <a href="/console/{{ vm.id }}" target="_blank" class="btn btn-sm btn-primary" style="padding:2px 8px;background:#2a6f97;">&#9664;|&#9654;</a>
                             {% endif %}
+                            {% if can_manage_slice %}
                             <a href="/edit/{{ slice.id }}?remove_vm={{ vm.id }}" class="btn btn-sm btn-danger" style="padding:2px 8px;">X</a>
+                            {% endif %}
                         </td>
                     </tr>
                     {% endfor %}
@@ -186,7 +191,7 @@
 
         <!-- LOGS -->
         <div class="card">
-            <h2>📝 Logs</h2>
+            <h2>Logs</h2>
             {% if logs %}
             <table>
                 <thead>

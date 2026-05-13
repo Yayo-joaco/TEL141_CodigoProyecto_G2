@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PUCP Cloud Orchestrator - Grupo 2</title>
+    <title>Crear Slice - PUCP Cloud Orchestrator</title>
     <link rel="stylesheet" href="/static/style.css">
     <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
     <style>
@@ -27,12 +27,19 @@
         {% endif %}
         {% endwith %}
 
+        <!-- Botón volver -->
+        <div style="margin-bottom:12px;">
+            <a href="/" class="btn btn-sm btn-primary" style="display:inline-flex;align-items:center;gap:6px;">
+                ← Volver a Slices
+            </a>
+        </div>
+
         <div class="grid-2">
-            <!-- CREATE SLICE -->
+            <!-- FORMULARIO CREAR / PLANTILLAS -->
             <div class="card">
                 <div class="tabs">
-                    <div class="tab active" onclick="switchTab('create')">Crear Slice</div>
-                    <div class="tab" onclick="switchTab('template')">Plantillas</div>
+                    <div class="tab active" onclick="switchTab('create', event)">Crear Slice</div>
+                    <div class="tab" onclick="switchTab('template', event)">Plantillas</div>
                 </div>
 
                 <div class="tab-content active" id="tab-create" style="padding-top:12px;">
@@ -66,7 +73,7 @@
                             <div></div>
                         </div>
                         <div style="background:#1a2e3a;border-radius:6px;padding:10px 14px;margin-bottom:12px;font-size:12px;color:#4db8ff;">
-                            <strong>⚙ VLAN y Subred auto-asignados</strong> — El sistema asigna automáticamente una VLAN única y una subred /28 del pool 10.60.3.0/24 para aislar cada slice (R5.3 + R1C.3).
+                            <strong>VLAN y Subred auto-asignados</strong> — El sistema asigna automaticamente una VLAN unica y una subred /28 del pool 10.60.3.0/24 para aislar cada slice.
                         </div>
                         <div class="checkbox-group"><input type="checkbox" name="enable_dhcp" id="enable_dhcp"><label for="enable_dhcp">Habilitar DHCP</label></div>
                         <div class="checkbox-group"><input type="checkbox" name="enable_internet" id="enable_internet"><label for="enable_internet">Habilitar Internet</label></div>
@@ -75,7 +82,7 @@
                 </div>
 
                 <div class="tab-content" id="tab-template" style="padding-top:12px;">
-                    <h3 style="font-size:14px;color:#4db8ff;margin-bottom:12px;">📥 Importar Plantilla</h3>
+                    <h3 style="font-size:14px;color:#4db8ff;margin-bottom:12px;">Importar Plantilla</h3>
                     <form method="POST" action="/import" enctype="multipart/form-data">
                         <div class="form-group">
                             <label>Archivo JSON</label>
@@ -84,7 +91,7 @@
                         <button type="submit" class="btn btn-primary btn-full">Importar y Crear Slice</button>
                     </form>
 
-                    <h3 style="font-size:14px;color:#4db8ff;margin:16px 0 12px;">💾 Guardar Configuración como Plantilla</h3>
+                    <h3 style="font-size:14px;color:#4db8ff;margin:16px 0 12px;">Guardar Configuracion como Plantilla</h3>
                     <form method="POST" action="/save-template">
                         <div class="form-group"><label>Nombre de plantilla</label><input type="text" name="template_name" placeholder="Ej: topo-lineal-4nodos" required></div>
                         <div class="form-group"><label>Descripción</label><input type="text" name="description" placeholder="Opcional"></div>
@@ -97,7 +104,7 @@
                     </form>
 
                     {% if templates %}
-                    <h3 style="font-size:14px;color:#4db8ff;margin:16px 0 12px;">📋 Plantillas Guardadas</h3>
+                    <h3 style="font-size:14px;color:#4db8ff;margin:16px 0 12px;">Plantillas Guardadas</h3>
                     <table style="font-size:11px;">
                         <tr><th>Nombre</th><th>Desc</th><th></th></tr>
                         {% for t in templates %}
@@ -115,12 +122,12 @@
             <!-- PREVIEW + HOSTS -->
             <div>
                 <div class="card">
-                    <h2>🔍 Vista previa: <span id="topo-name">Lineal</span></h2>
+                    <h2>Vista previa: <span id="topo-name">Lineal</span></h2>
                     <div id="preview-canvas"></div>
                 </div>
                 <div class="card">
-                    <h2>🖥 Servidores
-                        <a href="/refresh-hosts" class="btn btn-sm btn-primary" style="float:right;font-size:11px;">⟳ Actualizar</a>
+                    <h2>Servidores
+                        <a href="/refresh-hosts" class="btn btn-sm btn-primary" style="float:right;font-size:11px;">Actualizar</a>
                     </h2>
                     <div class="host-grid">
                         {% for host in hosts %}
@@ -147,55 +154,12 @@
                 </div>
             </div>
         </div>
-
-        <!-- SLICE LIST -->
-        <div class="card">
-            <h2>📋 Slices</h2>
-            {% if slices %}
-            <table>
-                <thead>
-                    <tr>
-                        <th>Nombre</th>
-                        <th>Topología</th>
-                        <th>VMs</th>
-                        <th>VLAN</th>
-                        <th>Subred</th>
-                        <th>Estado</th>
-                        <th>Creado</th>
-                        <th>Acciones</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for s in slices %}
-                    <tr>
-                        <td><strong>{{ s.name }}</strong></td>
-                        <td>{{ s.topology | capitalize }}</td>
-                        <td>{{ s.num_vms }}</td>
-                        <td>{{ s.vlan_id or '—' }}</td>
-                        <td style="font-family:monospace;font-size:11px;">{{ s.subnet or '—' }}</td>
-                        <td class="status-{{ s.status }}">● {{ s.status }}</td>
-                        <td style="font-size:11px;">{{ s.created_at[:16] }}</td>
-                        <td>
-                            <a href="/slice/{{ s.id }}" class="btn btn-sm btn-primary">Ver/Editar</a>
-                            <a href="/export-file/{{ s.id }}" class="btn btn-sm btn-primary">Exportar</a>
-                            {% if user_role == "admin" or s.created_by == username %}
-                            <a href="/delete/{{ s.id }}" class="btn btn-sm btn-danger" onclick="return confirm('¿Eliminar slice {{ s.name }}?')">Borrar</a>
-                            {% endif %}
-                        </td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-            {% else %}
-            <p style="color:#8ab4d8;text-align:center;padding:20px;">No hay slices creados aún.</p>
-            {% endif %}
-        </div>
     </div>
 
     <div class="footer">PUCP Private Cloud Orchestrator - TEL141 Ingeniería de Redes Cloud 2026-1 - Grupo 2</div>
 
     <script>
-    function switchTab(name) {
+    function switchTab(name, event) {
         document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
         document.querySelectorAll('.tab-content').forEach(tc => tc.classList.remove('active'));
         event.target.classList.add('active');
@@ -239,7 +203,6 @@
         setTimeout(function() { if(previewNet) previewNet.fit({ animation: { duration: 500 } }); }, 300);
     }
 
-    // Init preview on load
     window.addEventListener('DOMContentLoaded', function() { updatePreview(); });
     </script>
 </body>

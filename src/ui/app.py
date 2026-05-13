@@ -183,20 +183,38 @@ def register_page():
 @app.route("/")
 @login_required
 def index():
+    """Vista principal: lista de slices para todos los roles."""
     orch = get_orchestrator()
     role = session.get("role", "user")
     username = session.get("username", "")
-    role_enum = Role(role) if role else Role.USER
-
     user_obj = orch.db.get_user_by_username(username)
-    slices = orch.list_slices(user=user_obj)
+
+    # Admin ve todos los slices; usuario ve solo los suyos
+    if role == "admin":
+        slices = orch.list_slices(user=None)
+    else:
+        slices = orch.list_slices(user=user_obj)
+
+    return render_template("slices.html",
+                           all_slices=slices,
+                           user_role=role,
+                           username=username)
+
+
+@app.route("/crear-slice")
+@login_required
+def crear_slice_page():
+    """Formulario de creación de slices."""
+    orch = get_orchestrator()
+    role = session.get("role", "user")
+    username = session.get("username", "")
     hosts_status = orch.get_hosts_status()
     templates = orch.list_templates()
-
-    return render_template("index.html",
-                           slices=slices, hosts=hosts_status,
+    return render_template("crear_slice.html",
+                           hosts=hosts_status,
                            templates=templates,
-                           user_role=role, username=username)
+                           user_role=role,
+                           username=username)
 
 
 # =============================================================
@@ -219,7 +237,7 @@ def create_slice():
 
         if not name:
             flash("El nombre del slice es requerido", "error")
-            return redirect(url_for("index"))
+            return redirect(url_for("crear_slice_page"))
 
         result = orch.create_slice(
             name=name, topology=topology, num_vms=num_vms,
@@ -244,6 +262,16 @@ def create_slice():
 def edit_slice(slice_id):
     orch = get_orchestrator()
     try:
+        username = session.get("username", "")
+        user_obj = orch.db.get_user_by_username(username)
+        info = orch.get_slice(slice_id)
+        if not info:
+            flash("Slice no encontrado", "error")
+            return redirect(url_for("index"))
+        if user_obj and not user_obj.can_view_all_slices() and info["slice"]["created_by"] != username:
+            flash("No tienes permiso para editar este slice", "error")
+            return redirect(url_for("index"))
+
         add_vms = int(request.form.get("add_vms", "0"))
         remove_vm_ids = request.form.getlist("remove_vms")
         new_vcpus = request.form.get("new_vcpus")
@@ -272,14 +300,21 @@ def edit_slice(slice_id):
 @login_required
 def view_slice(slice_id):
     orch = get_orchestrator()
+    username = session.get("username", "")
+    user_obj = orch.db.get_user_by_username(username)
     info = orch.get_slice(slice_id)
     if not info:
         flash("Slice no encontrado", "error")
         return redirect(url_for("index"))
+    if user_obj and not user_obj.can_view_all_slices() and info["slice"]["created_by"] != username:
+        flash("No tienes permiso para ver este slice", "error")
+        return redirect(url_for("index"))
     logs = orch.get_logs(slice_id)
     return render_template("slice_detail.html",
                            slice=info["slice"], vms=info["vms"],
-                           logs=logs, user_role=session.get("role"))
+                           logs=logs, user_role=session.get("role"),
+                           username=username,
+                           can_manage_slice=bool(user_obj and (user_obj.can_view_all_slices() or info["slice"]["created_by"] == username)))
 
 
 @app.route("/console/<vm_id>")
@@ -413,7 +448,8 @@ def delete_template_route(template_id):
 def images_page():
     orch = get_orchestrator()
     images = orch.list_images()
-    return render_template("images.html", images=images, user_role=session.get("role"))
+    return render_template("images.html", images=images, user_role=session.get("role"),
+                           username=session.get("username", ""))
 
 
 @app.route("/import-image", methods=["POST"])
@@ -441,14 +477,14 @@ def import_image_route():
 @app.route("/admin")
 @admin_required
 def admin_page():
-    orch = get_orchestrator()
-    users = orch.list_users()
-    hosts = orch.get_hosts_status()
-    all_slices = orch.list_slices( user=None)
-    users_with_role = [u for u in users]
-    return render_template("admin.html",
-                           users=users_with_role, hosts=hosts,
-                           all_slices=all_slices)
+    return redirect(url_for("index"))
+
+
+@app.route("/slices")
+@login_required
+def slices_page():
+    """Redirige a / que ahora es la lista de slices."""
+    return redirect(url_for("index"))
 
 
 @app.route("/admin/users/delete/<user_id>")
@@ -457,7 +493,7 @@ def admin_delete_user(user_id):
     orch = get_orchestrator()
     orch.delete_user(user_id)
     flash("Usuario desactivado", "success")
-    return redirect(url_for("admin_page"))
+    return redirect(url_for("index"))
 
 
 @app.route("/admin/users/create", methods=["POST"])
@@ -473,7 +509,7 @@ def admin_create_user():
         flash(msg, "success" if success else "error")
     except Exception as e:
         flash(f"Error: {e}", "error")
-    return redirect(url_for("admin_page"))
+    return redirect(url_for("slices_page"))
 
 
 @app.route("/admin/sessions")
@@ -483,7 +519,8 @@ def admin_sessions():
     username = session.get("username", "")
     user_obj = orch.db.get_user_by_username(username)
     active = orch.get_active_sessions(user_obj) if user_obj else []
-    return render_template("sessions.html", sessions=active)
+    return render_template("sessions.html", sessions=active,
+                           username=username, user_role=session.get("role", ""))
 
 
 # =============================================================
@@ -580,6 +617,7 @@ def ws_proxy(vm_id):
 # =============================================================
 
 if __name__ == "__main__":
-    http_server = WSGIServer(('0.0.0.0', 8080), app, handler_class=WebSocketHandler)
-    print("PUCP Cloud Orchestrator running on http://0.0.0.0:8080")
+    port = int(os.environ.get("TEL141_UI_PORT", "8080"))
+    http_server = WSGIServer(('0.0.0.0', port), app, handler_class=WebSocketHandler)
+    print(f"PUCP Cloud Orchestrator running on http://0.0.0.0:{port}")
     http_server.serve_forever()
