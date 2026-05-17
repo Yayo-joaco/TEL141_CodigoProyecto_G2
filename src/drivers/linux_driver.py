@@ -60,8 +60,8 @@ class LinuxDriver(BaseDriver):
             self._exec(client, f"sudo ip tuntap add mode tap {vm.tap_interface}")
             self._exec(client, f"sudo ip link set {vm.tap_interface} up")
 
-            vm.vnc_port = self.vnc_base_port + vm.index
-            vm.vnc_ws_port = self.vnc_ws_base_port + vm.index
+            vm.vnc_port = vm.vnc_port or (self.vnc_base_port + vm.index)
+            vm.vnc_ws_port = vm.vnc_ws_port or (self.vnc_ws_base_port + vm.index)
             vm.vnc_token = str(uuid.uuid4())[:12]
 
             mac_addr = self._gen_mac(vm.index)

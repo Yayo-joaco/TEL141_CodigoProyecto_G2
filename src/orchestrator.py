@@ -17,6 +17,7 @@ from .drivers.linux_driver import LinuxDriver
 from .networking.network_manager import NetworkManager
 from .database.db_manager import DatabaseManager
 from .auth.auth_manager import AuthManager
+from .queue.task_queue import TaskQueue
 
 logger = logging.getLogger("orchestrator")
 
@@ -33,6 +34,7 @@ class Orchestrator:
         self.placement_engine = PlacementEngine(hosts)
         self.slice_manager = SliceManager(driver, network, db, base_image)
         self.auth = AuthManager(db)
+        self.task_queue = TaskQueue()
 
     # ---- Authentication ----
 
@@ -54,7 +56,9 @@ class Orchestrator:
     def create_slice(self, name: str, topology: str, num_vms: int,
                      vcpus: int = 1, ram_mb: int = 512, disk_gb: int = 2,
                      enable_dhcp: bool = False, enable_internet: bool = False,
-                     created_by: str = "admin") -> dict:
+                     created_by: str = "admin",
+                     vms_internet: List[int] = None,
+                     vms_image: dict = None) -> dict:
         try:
             topo = TopologyType(topology)
         except ValueError:
@@ -86,11 +90,17 @@ class Orchestrator:
         slice_obj.subnet = vlan_result["subnet"]
 
         vms = []
+        vms_internet = vms_internet or []
+        vms_image = vms_image or {}
         for i in range(num_vms):
+            vm_internet = (i + 1) in vms_internet
+            vm_img = vms_image.get(str(i + 1))
             vm = VM(id="", slice_id=slice_obj.id,
-                    name=f"{name}-vm{i+1}", index=i,
+                    name=f"vm{i+1}", index=i,
                     vcpus=vcpus, ram_mb=ram_mb, disk_gb=disk_gb,
-                    status=VMStatus.PENDING)
+                    status=VMStatus.PENDING,
+                    enable_internet=vm_internet,
+                    image=vm_img)
             vms.append(vm)
 
         plan = self.placement_engine.place_vms(slice_obj.id, vms)
@@ -105,6 +115,9 @@ class Orchestrator:
 
         for vm, decision in zip(vms, plan.decisions):
             vm.host_ip = decision.host_ip
+            ports = self.db.allocate_vm_ports(vm.host_ip)
+            vm.vnc_port = ports["vnc_port"]
+            vm.vnc_ws_port = ports["vnc_ws_port"]
 
         created_vms = self.slice_manager.create_slice(slice_obj, pre_placed_vms=vms)
         if not created_vms:
@@ -141,7 +154,7 @@ class Orchestrator:
                 current_count = len([v for v in vms if v.status != VMStatus.DELETED])
                 for i in range(add_vms):
                     new_vm = VM(id="", slice_id=slice_id,
-                                name=f"{slice_obj.name}-vm{current_count + i + 1}",
+                                name=f"vm{current_count + i + 1}",
                                 index=current_count + i,
                                 vcpus=new_vcpus or slice_obj.vcpus_per_vm,
                                 ram_mb=new_ram_mb or slice_obj.ram_mb_per_vm,
@@ -152,6 +165,9 @@ class Orchestrator:
                     return {"success": False, "error": plan.error_message}
                 for vm, decision in zip(extra_vms, plan.decisions):
                     vm.host_ip = decision.host_ip
+                    ports = self.db.allocate_vm_ports(vm.host_ip)
+                    vm.vnc_port = ports["vnc_port"]
+                    vm.vnc_ws_port = ports["vnc_ws_port"]
 
         success, msg, info = self.slice_manager.edit_slice(
             slice_id, add_vms, remove_vm_ids, new_vcpus, new_ram_mb, new_disk_gb,
@@ -182,6 +198,64 @@ class Orchestrator:
 
     def get_hosts_status(self) -> List[dict]:
         return self.slice_manager.get_hosts_status()
+
+    # ---- Host Management (R1.3 — hot add/remove without restart) ----
+
+    def add_host(self, hostname: str, ip: str, port: int = 22,
+                 role: str = "worker", added_by: str = "admin") -> dict:
+        from .models.host import HostRole
+        try:
+            host_role = HostRole(role)
+        except ValueError:
+            return {"success": False, "error": f"Rol inválido: {role}"}
+
+        # Check duplicate
+        for h in self.hosts:
+            if h.ip == ip or h.hostname == hostname:
+                return {"success": False, "error": f"Host {hostname} ({ip}) ya existe"}
+
+        new_host = Host(hostname=hostname, ip=ip, role=host_role, port=port)
+
+        # Try to query real resources; use defaults if unreachable
+        res = self.driver.get_host_resources(ip)
+        if res:
+            new_host.total_vcpus = res.get("total_vcpus", 8)
+            new_host.total_ram_mb = res.get("total_ram_mb", 8192)
+            new_host.total_disk_gb = res.get("total_disk_gb", 100)
+            new_host.available_vcpus = max(0, new_host.total_vcpus - int(
+                res.get("cpu_usage_pct", 0) / 100.0 * new_host.total_vcpus))
+            new_host.available_ram_mb = max(0, new_host.total_ram_mb - res.get("used_ram_mb", 0))
+            new_host.available_disk_gb = max(0, new_host.total_disk_gb - res.get("used_disk_gb", 0))
+
+        self.db.save_host(new_host)
+        self.hosts.append(new_host)
+        self.placement_engine.hosts = self.hosts
+        self.db.save_log("system", "orchestrator", "INFO",
+                         f"Host {hostname} ({ip}) agregado en caliente", user_id=added_by)
+        logger.info("Host %s (%s) added at runtime", hostname, ip)
+        return {"success": True, "hostname": hostname, "ip": ip,
+                "vcpus": new_host.total_vcpus, "ram_mb": new_host.total_ram_mb}
+
+    def remove_host(self, hostname: str, removed_by: str = "admin") -> dict:
+        host = next((h for h in self.hosts if h.hostname == hostname), None)
+        if not host:
+            return {"success": False, "error": f"Host {hostname} no encontrado"}
+
+        # Refuse if host has active VMs
+        active_vms = self.db.get_vms_by_host(host.ip)
+        running = [v for v in active_vms if v.status.value == "active"]
+        if running:
+            return {"success": False,
+                    "error": f"Host {hostname} tiene {len(running)} VM(s) activas. Elimínalas primero."}
+
+        host.is_active = False
+        self.db.save_host(host)
+        self.hosts[:] = [h for h in self.hosts if h.hostname != hostname]
+        self.placement_engine.hosts = self.hosts
+        self.db.save_log("system", "orchestrator", "INFO",
+                         f"Host {hostname} removido en caliente", user_id=removed_by)
+        logger.info("Host %s removed at runtime", hostname)
+        return {"success": True, "hostname": hostname}
 
     def refresh_hosts(self) -> dict:
         """Query real resources from all hosts via SSH and update DB."""
@@ -215,7 +289,6 @@ class Orchestrator:
                 vms = self.db.get_vms_by_host(host.ip)
                 active = [v for v in vms if v.status.value == 'active']
                 host.vms_running = len(active)
-                self.db.save_host(host)
         return {"refreshed": updated, "failed": failed}
 
     def get_logs(self, slice_id: str, user: User = None) -> List[dict]:
@@ -274,3 +347,40 @@ class Orchestrator:
 
     def get_active_sessions(self, user: User) -> list:
         return self.auth.get_active_sessions(user)
+
+    # ---- Async Task Queue Operations (R1.4, R1.6, R1.7) ----
+
+    def create_slice_async(self, name: str, topology: str, num_vms: int,
+                           vcpus: int = 1, ram_mb: int = 512, disk_gb: int = 2,
+                           enable_dhcp: bool = False, enable_internet: bool = False,
+                           created_by: str = "admin",
+                           vms_internet: List[int] = None,
+                           vms_image: dict = None) -> str:
+        return self.task_queue.enqueue(
+            f"create_slice:{name}",
+            self.create_slice,
+            name, topology, num_vms, vcpus, ram_mb, disk_gb,
+            enable_dhcp, enable_internet, created_by,
+            vms_internet, vms_image,
+        )
+
+    def delete_slice_async(self, slice_id: str, user: User = None) -> str:
+        return self.task_queue.enqueue(
+            f"delete_slice:{slice_id}",
+            self.delete_slice,
+            slice_id, user,
+        )
+
+    def edit_slice_async(self, slice_id: str, add_vms: int = 0,
+                         remove_vm_ids: List[str] = None,
+                         new_vcpus: int = None, new_ram_mb: int = None,
+                         new_disk_gb: int = None, user: User = None) -> str:
+        return self.task_queue.enqueue(
+            f"edit_slice:{slice_id}",
+            self.edit_slice,
+            slice_id, add_vms, remove_vm_ids,
+            new_vcpus, new_ram_mb, new_disk_gb, user,
+        )
+
+    def get_task_status(self, ticket_id: str) -> Optional[dict]:
+        return self.task_queue.get_task(ticket_id)

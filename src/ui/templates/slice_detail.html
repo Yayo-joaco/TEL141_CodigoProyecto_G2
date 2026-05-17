@@ -153,7 +153,8 @@
                         <th>Estado</th>
                         <th>MAC</th>
                         <th>VNC Port</th>
-                        <th>Token Consola</th>
+                        <th>Img</th>
+                        <th>Internet</th>
                         <th>Acción</th>
                     </tr>
                 </thead>
@@ -167,6 +168,8 @@
                         <td class="status-{{ vm.status }}">● {{ vm.status }}</td>
                         <td style="font-family:monospace;font-size:11px;">{{ vm.mac_address or '—' }}</td>
                         <td>{{ vm.vnc_port or '—' }}</td>
+                        <td>{{ vm.image or 'cirros' }}</td>
+                        <td>{% if vm.enable_internet %}🌐{% else %}—{% endif %}</td>
                         <td>
                             {% if vm.vnc_token %}
                             <code style="font-size:10px;">{{ vm.vnc_token }}</code>

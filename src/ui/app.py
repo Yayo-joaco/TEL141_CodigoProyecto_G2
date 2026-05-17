@@ -81,11 +81,24 @@ def get_orchestrator():
             db.save_host(host)
         ssh_key = hosts_cfg["ssh"].get("key_path", "/home/ubuntu/.ssh/id_rsa")
         driver = LinuxDriver(ssh_key_path=ssh_key)
-        network = NetworkManager(ssh_key_path=ssh_key)
+        network = NetworkManager(ssh_key_path=ssh_key,
+                                 headnode_ip=headnode["ip"])
         base_image = hosts_cfg["base_image"]["path"]
         _orchestrator = Orchestrator(hosts=hosts, driver=driver,
                                      network=network, db=db,
                                      base_image=base_image)
+        # Asegurar que la imagen de Ubuntu esté registrada
+        img_list = db.list_images()
+        ubuntu_exists = any(i.name == "ubuntu" for i in img_list)
+        if not ubuntu_exists:
+            db.save_image("ubuntu", "ubuntu-server.qcow2",
+                         "/home/ubuntu/ubuntu-server.qcow2",
+                         "qcow2", 3, "admin")
+        cirros_exists = any(i.name == "cirros" for i in img_list)
+        if not cirros_exists:
+            db.save_image("cirros", "cirros-base.img",
+                         base_image,
+                         "qcow2", 1, "admin")
         # Cargar recursos reales de los servidores al iniciar
         result = _orchestrator.refresh_hosts()
         logger.info("Hosts refreshed: %d OK, %d failed",
@@ -189,14 +202,16 @@ def index():
     username = session.get("username", "")
     user_obj = orch.db.get_user_by_username(username)
 
-    # Admin ve todos los slices; usuario ve solo los suyos
     if role == "admin":
         slices = orch.list_slices(user=None)
     else:
         slices = orch.list_slices(user=user_obj)
 
+    hosts = orch.get_hosts_status() if role == "admin" else []
+
     return render_template("slices.html",
                            all_slices=slices,
+                           hosts=hosts,
                            user_role=role,
                            username=username)
 
@@ -235,23 +250,28 @@ def create_slice():
         enable_dhcp = request.form.get("enable_dhcp") == "on"
         enable_internet = request.form.get("enable_internet") == "on"
 
+        vms_internet_str = request.form.get("vms_internet", "")
+        vms_internet = [int(x.strip()) for x in vms_internet_str.split(",") if x.strip().isdigit()]
+
+        vms_image = {}
+        for key in request.form:
+            if key.startswith("vm_image_"):
+                vm_num = key.replace("vm_image_", "")
+                vms_image[vm_num] = request.form[key]
+
         if not name:
             flash("El nombre del slice es requerido", "error")
             return redirect(url_for("crear_slice_page"))
 
-        result = orch.create_slice(
+        result = orch.create_slice_async(
             name=name, topology=topology, num_vms=num_vms,
             vcpus=vcpus, ram_mb=ram_mb, disk_gb=disk_gb,
             enable_dhcp=enable_dhcp, enable_internet=enable_internet,
             created_by=session.get("username", "admin"),
+            vms_internet=vms_internet, vms_image=vms_image,
         )
-
-        if result["success"]:
-            orch.refresh_hosts()
-            flash(f"Slice '{name}' creado: {num_vms} VMs, VLAN={result.get('vlan_id','?')}, "
-                  f"subnet={result.get('subnet','?')}", "success")
-        else:
-            flash(result.get("error", "Error al crear slice"), "error")
+        return redirect(url_for("task_status_page", ticket_id=result,
+                                next=url_for("index")))
     except Exception as e:
         flash(f"Error: {e}", "error")
     return redirect(url_for("index"))
@@ -282,15 +302,14 @@ def edit_slice(slice_id):
         new_ram_mb = int(new_ram_mb) if new_ram_mb and new_ram_mb.strip() else None
         new_disk_gb = int(new_disk_gb) if new_disk_gb and new_disk_gb.strip() else None
 
-        result = orch.edit_slice(
+        result = orch.edit_slice_async(
             slice_id=slice_id, add_vms=add_vms,
             remove_vm_ids=remove_vm_ids if remove_vm_ids else None,
             new_vcpus=new_vcpus, new_ram_mb=new_ram_mb,
-            new_disk_gb=new_disk_gb,
+            new_disk_gb=new_disk_gb, user=user_obj,
         )
-        if result["success"]:
-            orch.refresh_hosts()
-        flash(result.get("message", "Slice editado"), "success" if result["success"] else "error")
+        return redirect(url_for("task_status_page", ticket_id=result,
+                                next=url_for("view_slice", slice_id=slice_id)))
     except Exception as e:
         flash(f"Error: {e}", "error")
     return redirect(url_for("view_slice", slice_id=slice_id))
@@ -334,11 +353,9 @@ def delete_slice(slice_id):
     orch = get_orchestrator()
     username = session.get("username", "")
     user_obj = orch.db.get_user_by_username(username)
-    result = orch.delete_slice(slice_id, user=user_obj)
-    if result["success"]:
-        orch.refresh_hosts()
-    flash("Slice eliminado" if result["success"] else result.get("error", "Error"), "success")
-    return redirect(url_for("index"))
+    ticket_id = orch.delete_slice_async(slice_id, user=user_obj)
+    return redirect(url_for("task_status_page", ticket_id=ticket_id,
+                            next=url_for("index")))
 
 
 @app.route("/refresh-hosts")
@@ -346,12 +363,6 @@ def delete_slice(slice_id):
 def refresh_hosts():
     orch = get_orchestrator()
     result = orch.refresh_hosts()
-
-    for host in orch.hosts:
-        vms = orch.db.get_vms_by_host(host.ip)
-        active = [v for v in vms if v.status.value == 'active']
-        host.vms_running = len(active)
-        orch.db.save_host(host)
 
     flash(f"Hosts actualizados: {result['refreshed']} OK, {len(result.get('failed',[]))} fallaron", "success")
     return redirect(url_for("index"))
@@ -512,10 +523,67 @@ def admin_create_user():
     return redirect(url_for("slices_page"))
 
 
-@app.route("/admin/sessions")
+@app.route("/admin/hosts/add", methods=["POST"])
 @admin_required
-def admin_sessions():
+def admin_add_host():
     orch = get_orchestrator()
+    try:
+        hostname = request.form.get("hostname", "").strip()
+        ip = request.form.get("ip", "").strip()
+        port = int(request.form.get("port", "22"))
+        role = request.form.get("role", "worker")
+        if not hostname or not ip:
+            flash("Hostname e IP son requeridos", "error")
+            return redirect(url_for("index"))
+        result = orch.add_host(hostname, ip, port, role,
+                               added_by=session.get("username", "admin"))
+        flash(
+            f"Host {hostname} ({ip}) agregado: {result.get('vcpus', '?')} vCPUs, "
+            f"{result.get('ram_mb', '?')} MB RAM"
+            if result["success"] else result.get("error", "Error"),
+            "success" if result["success"] else "error"
+        )
+    except Exception as e:
+        flash(f"Error: {e}", "error")
+    return redirect(url_for("index"))
+
+
+@app.route("/admin/hosts/remove/<hostname>")
+@admin_required
+def admin_remove_host(hostname):
+    orch = get_orchestrator()
+    result = orch.remove_host(hostname, removed_by=session.get("username", "admin"))
+    flash(
+        f"Host {hostname} removido del cluster"
+        if result["success"] else result.get("error", "Error"),
+        "success" if result["success"] else "error"
+    )
+    return redirect(url_for("index"))
+
+
+# =============================================================
+# Task Queue - Polling endpoints (R1.4, R1.6, R1.7)
+# =============================================================
+
+@app.route("/api/task/<ticket_id>")
+@login_required
+def api_task_status(ticket_id):
+    orch = get_orchestrator()
+    task = orch.get_task_status(ticket_id)
+    if not task:
+        return jsonify({"error": "not_found"}), 404
+    return jsonify(task)
+
+
+@app.route("/task/<ticket_id>")
+@login_required
+def task_status_page(ticket_id):
+    redirect_url = request.args.get("next", url_for("index"))
+    return render_template("task_status.html",
+                           ticket_id=ticket_id,
+                           redirect_url=redirect_url,
+                           user_role=session.get("role", ""),
+                           username=session.get("username", ""))
     username = session.get("username", "")
     user_obj = orch.db.get_user_by_username(username)
     active = orch.get_active_sessions(user_obj) if user_obj else []

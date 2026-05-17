@@ -37,6 +37,8 @@ class VM:
     qemu_pid: Optional[int] = None
     status: VMStatus = VMStatus.PENDING
     error_message: Optional[str] = None
+    enable_internet: bool = False
+    image: Optional[str] = None
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
 
     def __post_init__(self):
@@ -60,6 +62,8 @@ class VM:
             "vnc_token": self.vnc_token,
             "tap_interface": self.tap_interface,
             "status": self.status.value if isinstance(self.status, VMStatus) else self.status,
+            "enable_internet": self.enable_internet,
+            "image": self.image,
             "error_message": self.error_message,
             "created_at": self.created_at,
         }

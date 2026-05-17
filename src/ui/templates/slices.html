@@ -80,6 +80,86 @@
             </div>
             {% endif %}
         </div>
+        {% if user_role == 'admin' %}
+        <div class="card" style="margin-top:1.5rem;">
+            <div class="card-heading">
+                <div>
+                    <h2>Gestión de Hosts (R1.3)</h2>
+                    <p>Agrega o remueve workers del cluster sin reiniciar el sistema.</p>
+                </div>
+                <a href="/refresh-hosts" class="btn btn-primary">Actualizar recursos</a>
+            </div>
+            {% if hosts %}
+            <table class="slice-table">
+                <thead>
+                    <tr>
+                        <th>Hostname</th>
+                        <th>IP</th>
+                        <th>Rol</th>
+                        <th>vCPUs</th>
+                        <th>RAM</th>
+                        <th>Disco</th>
+                        <th>VMs activas</th>
+                        <th>Acción</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for h in hosts %}
+                    <tr>
+                        <td><strong>{{ h.hostname }}</strong></td>
+                        <td>{{ h.ip }}</td>
+                        <td>{{ h.role }}</td>
+                        <td>{{ h.available_vcpus }}/{{ h.total_vcpus }}</td>
+                        <td>{{ h.available_ram_mb }}/{{ h.total_ram_mb }} MB</td>
+                        <td>{{ h.available_disk_gb }}/{{ h.total_disk_gb }} GB</td>
+                        <td>{{ h.vms_running }}</td>
+                        <td>
+                            {% if h.role != 'headnode' %}
+                            <a href="/admin/hosts/remove/{{ h.hostname }}"
+                               class="btn btn-sm btn-danger"
+                               onclick="return confirm('¿Remover host {{ h.hostname }} del cluster?')">
+                                Remover
+                            </a>
+                            {% else %}
+                            <span class="slice-table-subtext">Headnode</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% endif %}
+            <div style="margin-top:1rem; padding-top:1rem; border-top:1px solid #e5e7eb;">
+                <h3 style="margin-bottom:0.75rem;">Agregar nuevo worker</h3>
+                <form action="/admin/hosts/add" method="POST" style="display:flex; gap:0.75rem; flex-wrap:wrap; align-items:flex-end;">
+                    <div>
+                        <label style="display:block; font-size:0.85rem; margin-bottom:0.25rem;">Hostname</label>
+                        <input type="text" name="hostname" placeholder="server5" required
+                               style="padding:0.4rem 0.6rem; border:1px solid #d1d5db; border-radius:6px;">
+                    </div>
+                    <div>
+                        <label style="display:block; font-size:0.85rem; margin-bottom:0.25rem;">IP</label>
+                        <input type="text" name="ip" placeholder="10.0.10.5" required
+                               style="padding:0.4rem 0.6rem; border:1px solid #d1d5db; border-radius:6px;">
+                    </div>
+                    <div>
+                        <label style="display:block; font-size:0.85rem; margin-bottom:0.25rem;">Puerto SSH</label>
+                        <input type="number" name="port" value="22"
+                               style="padding:0.4rem 0.6rem; border:1px solid #d1d5db; border-radius:6px; width:80px;">
+                    </div>
+                    <div>
+                        <label style="display:block; font-size:0.85rem; margin-bottom:0.25rem;">Rol</label>
+                        <select name="role" style="padding:0.4rem 0.6rem; border:1px solid #d1d5db; border-radius:6px;">
+                            <option value="worker">worker</option>
+                            <option value="headnode">headnode</option>
+                        </select>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Agregar host</button>
+                </form>
+            </div>
+        </div>
+        {% endif %}
+
     </div>
 
     <div class="footer">

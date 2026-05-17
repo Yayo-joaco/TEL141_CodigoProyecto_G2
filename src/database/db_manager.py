@@ -158,6 +158,8 @@ class VMRecord(Base):
     tap_interface = Column(String(100), nullable=True)
     qemu_pid = Column(Integer, nullable=True)
     status = Column(String(50), default="pending")
+    enable_internet = Column(Integer, default=0)
+    image = Column(String(255), nullable=True)
     error_message = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -179,6 +181,8 @@ class VMRecord(Base):
             tap_interface=self.tap_interface,
             qemu_pid=self.qemu_pid,
             status=VMStatus(self.status) if self.status else VMStatus.PENDING,
+            enable_internet=bool(self.enable_internet),
+            image=self.image,
             error_message=self.error_message,
             created_at=self.created_at.isoformat() if self.created_at else "",
         )
@@ -438,6 +442,8 @@ class DatabaseManager:
                 tap_interface=vm.tap_interface,
                 qemu_pid=vm.qemu_pid,
                 status=vm.status.value,
+                enable_internet=int(vm.enable_internet),
+                image=vm.image,
                 error_message=vm.error_message,
             )
             session.merge(record)
@@ -468,6 +474,33 @@ class DatabaseManager:
         try:
             records = session.query(VMRecord).filter_by(host_ip=host_ip).all()
             return [r.to_vm() for r in records]
+        finally:
+            session.close()
+
+    def allocate_vm_ports(self, host_ip: str, base_vnc: int = 6000,
+                           base_ws: int = 17000) -> dict:
+        """Find free VNC and WebSocket ports on a given host."""
+        session = self.get_session()
+        try:
+            used_vnc = set()
+            records = session.query(VMRecord).filter_by(host_ip=host_ip).filter(
+                VMRecord.status.in_(['active', 'creating', 'pending'])
+            ).all()
+            for r in records:
+                if r.vnc_port:
+                    used_vnc.add(r.vnc_port)
+            vnc_port = base_vnc
+            while vnc_port in used_vnc:
+                vnc_port += 1
+            return {"vnc_port": vnc_port, "vnc_ws_port": vnc_port + 11000}
+        finally:
+            session.close()
+
+    def get_image_path(self, name: str) -> Optional[str]:
+        session = self.get_session()
+        try:
+            record = session.query(ImageRecord).filter_by(name=name, is_active=1).first()
+            return record.path if record else None
         finally:
             session.close()
 

@@ -75,9 +75,19 @@
                         <div style="background:#1a2e3a;border-radius:6px;padding:10px 14px;margin-bottom:12px;font-size:12px;color:#4db8ff;">
                             <strong>VLAN y Subred auto-asignados</strong> — El sistema asigna automaticamente una VLAN unica y una subred /28 del pool 10.60.3.0/24 para aislar cada slice.
                         </div>
-                        <div class="checkbox-group"><input type="checkbox" name="enable_dhcp" id="enable_dhcp"><label for="enable_dhcp">Habilitar DHCP</label></div>
-                        <div class="checkbox-group"><input type="checkbox" name="enable_internet" id="enable_internet"><label for="enable_internet">Habilitar Internet</label></div>
-                        <button type="submit" class="btn btn-primary btn-full">Crear Slice</button>
+                        <div class="checkbox-group"><input type="checkbox" name="enable_dhcp" id="enable_dhcp"><label for="enable_dhcp">Habilitar DHCP (para todas las VMs)</label></div>
+                        <div class="checkbox-group"><input type="checkbox" name="enable_internet" id="enable_internet"><label for="enable_internet">Habilitar Internet (NAT global del slice)</label></div>
+
+                        <!-- Per-VM config: image + internet access -->
+                        <div id="per-vm-config" style="margin-top:14px;background:#0f1923;border-radius:6px;padding:12px;">
+                            <div style="font-size:12px;color:#4db8ff;font-weight:bold;margin-bottom:8px;">
+                                Configuracion por VM
+                                <span style="font-weight:normal;color:#8ab4d8;"> — imagen y acceso a Internet individual</span>
+                            </div>
+                            <div id="vm-rows"></div>
+                        </div>
+
+                        <button type="submit" class="btn btn-primary btn-full" style="margin-top:14px;">Crear Slice</button>
                     </form>
                 </div>
 
@@ -165,6 +175,58 @@
         event.target.classList.add('active');
         document.getElementById('tab-' + name).classList.add('active');
     }
+
+    // Rebuild per-VM rows whenever num_vms changes
+    function buildVmRows() {
+        var n = parseInt(document.getElementById('num_vms').value) || 1;
+        var container = document.getElementById('vm-rows');
+        container.innerHTML = '';
+        for (var i = 1; i <= n; i++) {
+            var row = document.createElement('div');
+            row.style.cssText = 'display:flex;gap:10px;align-items:center;margin-bottom:6px;font-size:12px;';
+            row.innerHTML =
+                '<span style="color:#8ab4d8;min-width:32px;">VM' + i + '</span>' +
+                '<select name="vm_image_' + i + '" style="flex:1;font-size:12px;padding:4px 6px;background:#0f1923;color:#ccd6dd;border:1px solid #1e3742;border-radius:4px;">' +
+                '  <option value="">cirros (default)</option>' +
+                '  <option value="ubuntu">ubuntu</option>' +
+                '  <option value="cirros">cirros</option>' +
+                '</select>' +
+                '<label style="display:flex;align-items:center;gap:4px;white-space:nowrap;color:#8ab4d8;">' +
+                '  <input type="checkbox" name="vm_internet_' + i + '" value="' + i + '"> Internet' +
+                '</label>';
+            container.appendChild(row);
+        }
+    }
+
+    // Collect per-VM internet checkboxes into the hidden vms_internet field before submit
+    document.addEventListener('DOMContentLoaded', function() {
+        var form = document.querySelector('form[action="/create"]');
+        if (form) {
+            // Add hidden field for vms_internet
+            var hidden = document.createElement('input');
+            hidden.type = 'hidden';
+            hidden.name = 'vms_internet';
+            hidden.id = 'vms_internet_hidden';
+            form.appendChild(hidden);
+
+            form.addEventListener('submit', function() {
+                var n = parseInt(document.getElementById('num_vms').value) || 1;
+                var selected = [];
+                for (var i = 1; i <= n; i++) {
+                    var cb = form.querySelector('input[name="vm_internet_' + i + '"]');
+                    if (cb && cb.checked) selected.push(i);
+                }
+                document.getElementById('vms_internet_hidden').value = selected.join(',');
+            });
+        }
+        buildVmRows();
+        updatePreview();
+    });
+
+    document.getElementById('num_vms').addEventListener('change', function() {
+        buildVmRows();
+        updatePreview();
+    });
 
     var previewNet = null;
     function updatePreview() {

@@ -4,6 +4,7 @@
 
 import logging
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional, Tuple
 
 from ..models.slice import Slice, SliceStatus, TopologyType
@@ -33,15 +34,30 @@ class SliceManager:
             vms = self._build_vm_objects(slice_obj)
         slice_obj.status = SliceStatus.CREATING
 
-        for vm in vms:
+        # Deploy all VMs in parallel (R1.11 — paralelismo en despliegue)
+        def _deploy(vm: VM):
             placement = self._get_placement_for_vm(vm)
             if not placement:
-                self._rollback_slice(slice_obj, vms, f"Placement missing for {vm.name}")
-                return []
-            success = self.driver.create_vm(vm, placement, self.base_image)
-            if not success:
-                self._rollback_slice(slice_obj, vms, f"Failed to create VM {vm.name}")
-                return []
+                return vm, False, f"Placement missing for {vm.name}"
+            image_path = self.base_image
+            if vm.image:
+                img = self.db.get_image_path(vm.image)
+                if img:
+                    image_path = img
+            ok = self.driver.create_vm(vm, placement, image_path)
+            return vm, ok, vm.error_message if not ok else None
+
+        failed_error = None
+        with ThreadPoolExecutor(max_workers=len(vms)) as executor:
+            futures = {executor.submit(_deploy, vm): vm for vm in vms}
+            for future in as_completed(futures):
+                vm, ok, err = future.result()
+                if not ok and failed_error is None:
+                    failed_error = err or f"Failed to create VM {vm.name}"
+
+        if failed_error:
+            self._rollback_slice(slice_obj, vms, failed_error)
+            return []
 
         slice_obj.status = SliceStatus.CONFIGURING_NETWORK
         vlan_id = slice_obj.vlan_id or 300
@@ -102,7 +118,12 @@ class SliceManager:
                 placement = self._get_placement_for_vm(new_vm)
                 if not placement:
                     return False, f"No se pudo ubicar VM {new_vm.name}", None
-                success = self.driver.create_vm(new_vm, placement, self.base_image)
+                image_path = self.base_image
+                if new_vm.image:
+                    img = self.db.get_image_path(new_vm.image)
+                    if img:
+                        image_path = img
+                success = self.driver.create_vm(new_vm, placement, image_path)
                 if not success:
                     return False, f"Fallo al crear VM {new_vm.name}", None
                 new_vms_list.append(new_vm)
@@ -177,7 +198,7 @@ class SliceManager:
         for i in range(slice_obj.num_vms):
             vm = VM(
                 id="", slice_id=slice_obj.id,
-                name=f"{slice_obj.name}-vm{i+1}", index=i,
+                name=f"vm{i+1}", index=i,
                 vcpus=slice_obj.vcpus_per_vm,
                 ram_mb=slice_obj.ram_mb_per_vm,
                 disk_gb=slice_obj.disk_gb_per_vm,
