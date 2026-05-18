@@ -146,7 +146,9 @@ class Orchestrator:
                    new_vcpus: int = None, new_ram_mb: int = None,
                    new_disk_gb: int = None, user: User = None,
                    new_vms_image: dict = None,
-                   new_vms_internet: List[int] = None) -> dict:
+                   new_vms_internet: List[int] = None,
+                   ext_topology: str = None,
+                   anchor_vm_hint: str = None) -> dict:
         vms = self.db.get_vms_for_slice(slice_id)
         if remove_vm_ids:
             for vm in vms:
@@ -186,7 +188,9 @@ class Orchestrator:
 
         success, msg, info = self.slice_manager.edit_slice(
             slice_id, add_vms, remove_vm_ids, new_vcpus, new_ram_mb, new_disk_gb,
-            pre_placed_vms=extra_vms)
+            pre_placed_vms=extra_vms,
+            ext_topology=ext_topology,
+            anchor_vm_hint=anchor_vm_hint)
         return {"success": success, "message": msg, "slice": info}
 
     def delete_slice(self, slice_id: str, user: User = None) -> dict:
@@ -392,13 +396,16 @@ class Orchestrator:
                          new_vcpus: int = None, new_ram_mb: int = None,
                          new_disk_gb: int = None, user: User = None,
                          new_vms_image: dict = None,
-                         new_vms_internet: List[int] = None) -> str:
+                         new_vms_internet: List[int] = None,
+                         ext_topology: str = None,
+                         anchor_vm_hint: str = None) -> str:
         return self.task_queue.enqueue(
             f"edit_slice:{slice_id}",
             self.edit_slice,
             slice_id, add_vms, remove_vm_ids,
             new_vcpus, new_ram_mb, new_disk_gb, user,
             new_vms_image, new_vms_internet,
+            ext_topology, anchor_vm_hint,
         )
 
     def get_task_status(self, ticket_id: str) -> Optional[dict]:

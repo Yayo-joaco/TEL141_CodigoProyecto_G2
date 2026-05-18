@@ -117,6 +117,9 @@ class SliceRecord(Base):
     status = Column(String(50), default="pending")
     created_by = Column(String(255), default="admin")
     error_message = Column(Text, nullable=True)
+    ext_topology = Column(String(50), nullable=True)
+    anchor_vm_name = Column(String(255), nullable=True)
+    base_num_vms = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
 
@@ -138,6 +141,9 @@ class SliceRecord(Base):
             created_at=self.created_at.isoformat() if self.created_at else "",
             updated_at=self.updated_at.isoformat() if self.updated_at else "",
             error_message=self.error_message,
+            ext_topology=getattr(self, 'ext_topology', None),
+            anchor_vm_name=getattr(self, 'anchor_vm_name', None),
+            base_num_vms=getattr(self, 'base_num_vms', None),
         )
 
 
@@ -255,8 +261,28 @@ class DatabaseManager:
 
     def _ensure_tables(self):
         Base.metadata.create_all(self.engine)
+        self._migrate_columns()
         self._populate_vlan_pool()
         logger.info("Database tables verified/created")
+
+    def _migrate_columns(self):
+        """Add new columns to existing tables if they don't exist yet."""
+        migrations = [
+            ("slices", "ext_topology", "VARCHAR(50)"),
+            ("slices", "anchor_vm_name", "VARCHAR(255)"),
+            ("slices", "base_num_vms", "INT"),
+        ]
+        with self.engine.connect() as conn:
+            for table, col, col_type in migrations:
+                try:
+                    conn.execute(
+                        __import__('sqlalchemy').text(
+                            f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"
+                        )
+                    )
+                    logger.info("Migrated: added column %s.%s", table, col)
+                except Exception:
+                    pass  # column already exists
 
     def _populate_vlan_pool(self):
         """Ensure VLAN pool has data (16 VLANs: 300-315)."""
@@ -357,6 +383,9 @@ class DatabaseManager:
                 status=slice_obj.status.value,
                 created_by=slice_obj.created_by,
                 error_message=slice_obj.error_message,
+                ext_topology=slice_obj.ext_topology,
+                anchor_vm_name=slice_obj.anchor_vm_name,
+                base_num_vms=slice_obj.base_num_vms,
             )
             session.merge(record)
             session.commit()

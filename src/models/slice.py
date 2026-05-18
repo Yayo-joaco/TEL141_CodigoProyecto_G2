@@ -46,6 +46,9 @@ class Slice:
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
     updated_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
     error_message: Optional[str] = None
+    ext_topology: Optional[str] = None
+    anchor_vm_name: Optional[str] = None
+    base_num_vms: Optional[int] = None
 
     def __post_init__(self):
         if not self.id:
@@ -69,4 +72,7 @@ class Slice:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "error_message": self.error_message,
+            "ext_topology": self.ext_topology,
+            "anchor_vm_name": self.anchor_vm_name,
+            "base_num_vms": self.base_num_vms,
         }

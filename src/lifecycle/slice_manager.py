@@ -81,7 +81,9 @@ class SliceManager:
                    remove_vm_ids: List[str] = None,
                    new_vcpus: int = None, new_ram_mb: int = None,
                    new_disk_gb: int = None,
-                   pre_placed_vms: List[VM] = None) -> Tuple[bool, str, Optional[dict]]:
+                   pre_placed_vms: List[VM] = None,
+                   ext_topology: str = None,
+                   anchor_vm_hint: str = None) -> Tuple[bool, str, Optional[dict]]:
         """
         Edit an existing slice:
           - Add N more VMs (with placement)
@@ -131,6 +133,11 @@ class SliceManager:
 
         all_vms = active_vms + new_vms_list
         slice_obj.num_vms = len(all_vms)
+
+        if add_vms > 0 and new_vms_list:
+            slice_obj.ext_topology = ext_topology or 'lineal'
+            slice_obj.anchor_vm_name = anchor_vm_hint or (active_vms[-1].name if active_vms else None)
+            slice_obj.base_num_vms = len(active_vms)
 
         if new_vms_list:
             vlan_id = slice_obj.vlan_id or 300

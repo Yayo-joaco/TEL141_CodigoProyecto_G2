@@ -331,6 +331,8 @@ def edit_slice(slice_id):
             new_disk_gb=new_disk_gb, user=user_obj,
             new_vms_image=new_vms_image if new_vms_image else None,
             new_vms_internet=new_vms_internet if new_vms_internet else None,
+            ext_topology=request.form.get("ext_topology", "lineal").strip() or None,
+            anchor_vm_hint=request.form.get("anchor_vm_hint", "").strip() or None,
         )
         return redirect(url_for("task_status_page", ticket_id=result,
                                 next=url_for("view_slice", slice_id=slice_id)))
