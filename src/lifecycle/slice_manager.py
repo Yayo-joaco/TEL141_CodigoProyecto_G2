@@ -135,6 +135,7 @@ class SliceManager:
                 logger.info("VM %s removed from slice %s", vm_to_remove.name, slice_obj.name)
 
         new_vms_list = []
+        anchor_vm_obj = None  # set inside the block below; used later for VLAN wiring
         if add_vms > 0 and pre_placed_vms:
             # Compute extension links and allocate VLANs for them
             all_vms_after = active_vms + pre_placed_vms
@@ -162,14 +163,36 @@ class SliceManager:
             existing_lv = slice_obj.link_vlans or []
             slice_obj.link_vlans = existing_lv + ext_link_vlans
 
-            # Build link map for new VMs only
+            # Build link map for ALL VMs (anchor included)
+            ext_links_real = [
+                (anchor_idx if a == 0 else len(active_vms) + a - 1,
+                 anchor_idx if b == 0 else len(active_vms) + b - 1)
+                for a, b in ext_links_raw
+            ]
             ext_vm_link_map = self._build_vm_link_map(
-                all_vms_after,
-                [(anchor_idx if a == 0 else len(active_vms) + a - 1,
-                  anchor_idx if b == 0 else len(active_vms) + b - 1)
-                 for a, b in ext_links_raw],
-                ext_link_vlans,
+                all_vms_after, ext_links_real, ext_link_vlans,
             )
+
+            # Update anchor VM's interfaces with the new link(s)
+            anchor_vm_obj = all_vms_after[anchor_idx]
+            existing_link_count = len(
+                [i for i in (anchor_vm_obj.interfaces or []) if i.get("type") == "link"]
+            )
+            existing_link_indices = {
+                ifc.get("link_idx")
+                for ifc in (anchor_vm_obj.interfaces or [])
+                if ifc.get("type") == "link"
+            }
+            for lnk in ext_vm_link_map.get(anchor_vm_obj.name, []):
+                if lnk["link_idx"] not in existing_link_indices:
+                    new_iface = self.driver.add_link_tap(
+                        anchor_vm_obj, lnk, existing_link_count
+                    )
+                    if new_iface:
+                        if anchor_vm_obj.interfaces is None:
+                            anchor_vm_obj.interfaces = []
+                        anchor_vm_obj.interfaces.append(new_iface)
+                        existing_link_count += 1
 
             for new_vm in pre_placed_vms:
                 placement = self._get_placement_for_vm(new_vm)
@@ -208,9 +231,21 @@ class SliceManager:
                 for iface in (vm.interfaces or []):
                     if iface.get("type") == "link" and iface.get("vlan_id") and vm.host_ip:
                         self.network._set_vlan(vm.host_ip, iface["tap_name"], iface["vlan_id"])
-                # Assign predictable IP to new VM
                 if not vm.ip_address:
                     vm.ip_address = f"{subnet_base}.{vm.index + 2}"
+
+            # Set VLAN for anchor VM's newly added link taps, then restart so
+            # the new interface appears inside the running VM
+            if anchor_vm_obj and anchor_vm_obj.host_ip:
+                new_link_indices = {lv["link_idx"] for lv in (slice_obj.link_vlans or [])
+                                    if lv["link_idx"] >= (slice_obj.base_num_vms or 0)}
+                for iface in (anchor_vm_obj.interfaces or []):
+                    if (iface.get("type") == "link" and iface.get("vlan_id")
+                            and iface.get("link_idx") in new_link_indices):
+                        self.network._set_vlan(
+                            anchor_vm_obj.host_ip, iface["tap_name"], iface["vlan_id"]
+                        )
+                self.driver.restart_vm(anchor_vm_obj)
 
             # Restart dnsmasq with leases for ALL VMs (old + new)
             if slice_obj.enable_dhcp:
@@ -304,17 +339,20 @@ class SliceManager:
         vm_names = [vm.name for vm in vms]
         vlan_by_link = {lv["link_idx"]: lv["vlan_id"] for lv in link_vlans}
         result = {vm.name: [] for vm in vms}
-        for link_idx, (a, b) in enumerate(links):
+        # Use actual link_idx from link_vlans (not enumerate) so edit_slice offsets work
+        link_indices = [lv["link_idx"] for lv in link_vlans]
+        for i, (a, b) in enumerate(links):
             if a >= len(vm_names) or b >= len(vm_names):
                 continue
-            vlan_id = vlan_by_link.get(link_idx)
+            actual_link_idx = link_indices[i] if i < len(link_indices) else i
+            vlan_id = vlan_by_link.get(actual_link_idx)
             result[vm_names[a]].append({
-                "link_idx": link_idx,
+                "link_idx": actual_link_idx,
                 "vlan_id": vlan_id,
                 "peer_vm_name": vm_names[b],
             })
             result[vm_names[b]].append({
-                "link_idx": link_idx,
+                "link_idx": actual_link_idx,
                 "vlan_id": vlan_id,
                 "peer_vm_name": vm_names[a],
             })

@@ -401,19 +401,12 @@
 
         var network = new vis.Network(container, data, options);
 
-        // Click on node: show interface popup + scroll to VM in table
+        // Click on node: show interface popup
         network.on('click', function(params) {
             if (params.nodes.length > 0) {
                 var nodeId = params.nodes[0];
                 var vm = vms[nodeId];
                 if (vm) {
-                    // Scroll to row
-                    var rows = document.querySelectorAll('table tbody tr');
-                    rows.forEach(function(r) { r.style.background = ''; });
-                    if (rows[nodeId]) {
-                        rows[nodeId].style.background = '#1a3a4a';
-                        rows[nodeId].scrollIntoView({ behavior: 'smooth', block: 'center' });
-                    }
                     // Show interface popup
                     var ifaces = vm.interfaces || [];
                     if (ifaces.length > 0) {

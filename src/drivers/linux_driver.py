@@ -168,6 +168,111 @@ class LinuxDriver(BaseDriver):
             logger.error("Failed to create VM %s on %s: %s", vm_name, host_ip, e)
             return False
 
+    def add_link_tap(self, vm: VM, link_info: dict, link_local_idx: int) -> Optional[dict]:
+        """Create a new link tap for an already-running VM (anchor VM in edit_slice).
+        The tap is wired into OVS; VLAN is set later by NetworkManager._set_vlan().
+        Returns the interface record dict, or None on failure.
+        """
+        host_ip = vm.host_ip
+        vm_name = vm.name
+        link_idx = link_info["link_idx"]
+        link_tap = f"tap-{vm_name}-l{link_idx}"
+        link_mac = self._gen_link_mac(vm.index, link_local_idx)
+        iface_name = (f"ens{link_local_idx + 4}"
+                      if (vm.image or "").lower() == "ubuntu"
+                      else f"eth{link_local_idx + 1}")
+        try:
+            client = self._connect(host_ip)
+            self._exec(client, f"sudo ip tuntap add mode tap {link_tap} 2>/dev/null; true")
+            self._exec(client, f"sudo ip link set {link_tap} up 2>/dev/null; true")
+            self._exec(client,
+                       f"sudo ovs-vsctl --may-exist add-port {self.OVS_BRIDGE} {link_tap}")
+            client.close()
+            logger.info("Added link tap %s to VM %s on %s", link_tap, vm_name, host_ip)
+            return {
+                "type": "link",
+                "tap_name": link_tap,
+                "mac": link_mac,
+                "vlan_id": link_info.get("vlan_id"),
+                "link_idx": link_idx,
+                "peer_vm_name": link_info.get("peer_vm_name"),
+                "iface_name": iface_name,
+            }
+        except Exception as e:
+            logger.error("Failed to add link tap %s to VM %s: %s", link_tap, vm_name, e)
+            return None
+
+    def restart_vm(self, vm: VM) -> bool:
+        """Restart a VM rebuilding the QEMU command from vm.interfaces.
+        Used after add_link_tap() so the new interface appears inside the VM.
+        The disk delta is preserved; only the QEMU process is replaced.
+        """
+        host_ip = vm.host_ip
+        vm_name = vm.name
+        try:
+            client = self._connect(host_ip)
+
+            # Kill current process
+            if vm.qemu_pid:
+                self._exec(client, f"sudo kill {vm.qemu_pid} 2>/dev/null; true")
+                time.sleep(2)
+
+            # Rebuild net_args from stored interfaces (primary first, then links in order)
+            net_args = ""
+            for net_idx, ifc in enumerate(vm.interfaces or []):
+                tap = ifc["tap_name"]
+                mac = ifc["mac"]
+                net_id = f"net{net_idx}"
+                self._exec(client, f"sudo ip link set {tap} up 2>/dev/null; true")
+                net_args += (
+                    f"-netdev tap,id={net_id},ifname={tap},script=no,downscript=no "
+                    f"-device virtio-net-pci,netdev={net_id},mac={mac} "
+                )
+
+            vm_disk = f"{self.VM_BASE_DIR}/{vm_name}/{vm_name}.qcow2"
+            vnc_display = vm.vnc_port - self.vnc_base_port
+
+            qemu_cmd = (
+                f"sudo qemu-system-x86_64 "
+                f"-name {vm_name} "
+                f"-m {vm.ram_mb} "
+                f"-smp {vm.vcpus} "
+                f"-drive file={vm_disk},if=virtio,format=qcow2 "
+                f"{net_args}"
+                f"-vnc 0.0.0.0:{vnc_display} "
+                f"-daemonize "
+                f"-enable-kvm"
+            )
+            self._exec(client, qemu_cmd)
+            time.sleep(2)
+
+            pid_out = self._exec(
+                client, f"sudo pgrep -f 'qemu-system-x86_64.*-name {vm_name}'"
+            )
+            if pid_out.strip():
+                vm.qemu_pid = int(pid_out.strip().split('\n')[0])
+                vm.status = VMStatus.ACTIVE
+                # Restart websockify in case it died
+                vnc_raw = 5900 + vnc_display
+                self._exec(client,
+                           f"sudo pkill -f 'websockify.*{vm.vnc_ws_port}' 2>/dev/null; true")
+                self._exec(client,
+                           f"sudo nohup websockify {vm.vnc_ws_port} 127.0.0.1:{vnc_raw} "
+                           f">/dev/null 2>&1 &")
+                logger.info("VM %s restarted on %s (PID=%d)", vm_name, host_ip, vm.qemu_pid)
+            else:
+                vm.status = VMStatus.ERROR
+                vm.error_message = "QEMU did not restart"
+                logger.error("VM %s: QEMU did not restart on %s", vm_name, host_ip)
+                client.close()
+                return False
+
+            client.close()
+            return True
+        except Exception as e:
+            logger.error("Failed to restart VM %s on %s: %s", vm_name, host_ip, e)
+            return False
+
     def delete_vm(self, vm: VM) -> bool:
         host_ip = vm.host_ip
         vm_name = vm.name
