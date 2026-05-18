@@ -126,14 +126,22 @@ class LinuxDriver(BaseDriver):
                     "    ens3:\n"
                     "      dhcp4: true\n"
                 )
+                # Disable cloud-init network management so it doesn't
+                # regenerate 50-cloud-init.yaml and override our netplan.
+                ci_disable = "network:\n  config: disabled\n"
                 np_b64 = base64.b64encode(netplan_yaml.encode()).decode()
+                ci_b64 = base64.b64encode(ci_disable.encode()).decode()
                 self._exec(client,
-                           f"echo {np_b64} | base64 -d > /tmp/{vm_name}-netplan.yaml")
+                           f"echo {np_b64} | base64 -d > /tmp/{vm_name}-netplan.yaml && "
+                           f"echo {ci_b64} | base64 -d > /tmp/{vm_name}-ci-disable.yaml")
                 self._exec(client,
                            f"sudo virt-customize -a {vm_disk} "
                            f"--password ubuntu:password:ubuntu "
-                           f"--upload /tmp/{vm_name}-netplan.yaml:"
-                           f"/etc/netplan/99-ens3-dhcp.yaml "
+                           f"--upload /tmp/{vm_name}-netplan.yaml:/etc/netplan/99-ens3-dhcp.yaml "
+                           f"--run-command 'rm -f /etc/netplan/50-cloud-init.yaml' "
+                           f"--run-command 'mkdir -p /etc/cloud/cloud.cfg.d' "
+                           f"--upload /tmp/{vm_name}-ci-disable.yaml:"
+                           f"/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg "
                            f"--quiet 2>/dev/null || true")
 
             qemu_cmd = (
