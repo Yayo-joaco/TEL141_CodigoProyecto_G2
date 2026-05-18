@@ -478,11 +478,14 @@ class DatabaseManager:
             session.close()
 
     def allocate_vm_ports(self, host_ip: str, base_vnc: int = 6000,
-                           base_ws: int = 17000) -> dict:
-        """Find free VNC and WebSocket ports on a given host."""
+                           base_ws: int = 17000, extra_used: set = None) -> dict:
+        """Find free VNC and WebSocket ports on a given host.
+
+        extra_used: ports already allocated in-flight (not yet saved to DB).
+        """
         session = self.get_session()
         try:
-            used_vnc = set()
+            used_vnc = set(extra_used or [])
             records = session.query(VMRecord).filter_by(host_ip=host_ip).filter(
                 VMRecord.status.in_(['active', 'creating', 'pending'])
             ).all()
@@ -551,7 +554,14 @@ class DatabaseManager:
         session = self.get_session()
         try:
             records = session.query(HostRecord).filter_by(is_active=1).all()
-            return [r.to_host() for r in records]
+            hosts = []
+            for r in records:
+                h = r.to_host()
+                h.vms_running = session.query(VMRecord).filter_by(
+                    host_ip=r.ip
+                ).filter(VMRecord.status == 'active').count()
+                hosts.append(h)
+            return hosts
         finally:
             session.close()
 

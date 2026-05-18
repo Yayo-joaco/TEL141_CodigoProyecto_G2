@@ -114,25 +114,53 @@
         <div class="card">
             <h2>Editar Slice</h2>
             <form method="POST" action="/edit/{{ slice.id }}">
-                <div class="form-row">
-                    <div class="form-group">
-                        <label>Agregar VMs</label>
-                        <input type="number" name="add_vms" value="0" min="0" max="10">
+                <!-- Extensión topológica -->
+                <div style="background:#1a2e3a;border-radius:6px;padding:14px;margin-bottom:16px;">
+                    <h3 style="color:#4db8ff;font-size:13px;margin:0 0 12px;">Extensión Topológica</h3>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>VM Ancla (desde dónde extender)</label>
+                            <select name="anchor_vm_hint">
+                                <option value="">— Sin ancla —</option>
+                                {% for vm in vms %}
+                                <option value="{{ vm.name }}">{{ vm.name }} ({{ vm.host_ip or '?' }})</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Topología de extensión</label>
+                            <select name="ext_topology">
+                                <option value="lineal">Lineal</option>
+                                <option value="anillo">Anillo</option>
+                                <option value="malla">Malla</option>
+                                <option value="bus">Bus</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>VMs a agregar</label>
+                            <input type="number" name="add_vms" value="0" min="0" max="10">
+                        </div>
+                        <div class="form-group">
+                            <label>Imagen para nuevas VMs</label>
+                            <input type="text" name="new_vm_image_all" placeholder="cirros">
+                        </div>
                     </div>
                     <div class="form-group">
-                        <label>Nuevo vCPUs/VM (opcional)</label>
-                        <input type="number" name="new_vcpus" placeholder="{{ slice.vcpus_per_vm }}" min="1" max="8">
+                        <label>Nuevas VMs con Internet (números absolutos, ej: {{ slice.num_vms + 1 }},{{ slice.num_vms + 2 }})</label>
+                        <input type="text" name="new_vms_internet" placeholder="ej: {{ slice.num_vms + 1 }}">
                     </div>
                 </div>
-                <div class="form-row">
-                    <div class="form-group">
-                        <label>Nueva RAM/VM MB (opcional)</label>
-                        <input type="number" name="new_ram_mb" placeholder="{{ slice.ram_mb_per_vm }}" min="128" max="8192" step="128">
-                    </div>
-                    <div class="form-group">
-                        <label>Nuevo Disco/VM GB (opcional)</label>
-                        <input type="number" name="new_disk_gb" placeholder="{{ slice.disk_gb_per_vm }}" min="1" max="50">
-                    </div>
+                <!-- Eliminar VMs -->
+                <div style="background:#1a2e3a;border-radius:6px;padding:14px;margin-bottom:16px;">
+                    <h3 style="color:#4db8ff;font-size:13px;margin:0 0 10px;">Eliminar VMs existentes</h3>
+                    {% for vm in vms %}
+                    <label style="display:block;margin-bottom:4px;font-size:12px;">
+                        <input type="checkbox" name="remove_vms" value="{{ vm.id }}">
+                        {{ vm.name }} ({{ vm.host_ip or '?' }}) — {{ vm.status }}
+                    </label>
+                    {% endfor %}
                 </div>
                 <button type="submit" class="btn btn-primary">Aplicar Cambios</button>
             </form>

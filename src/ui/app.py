@@ -311,6 +311,15 @@ def edit_slice(slice_id):
             if key.startswith("vm_image_"):
                 vm_num = key.replace("vm_image_", "")
                 new_vms_image[vm_num] = request.form[key]
+        # new_vm_image_all applies the same image to all new VMs
+        image_all = request.form.get("new_vm_image_all", "").strip()
+        if image_all and add_vms > 0:
+            current_vms = orch.db.get_vms_for_slice(slice_id)
+            current_count = len([v for v in current_vms if v.status != "deleted"])
+            for i in range(add_vms):
+                vm_num = str(current_count + i + 1)
+                if vm_num not in new_vms_image:
+                    new_vms_image[vm_num] = image_all
 
         new_vms_internet_str = request.form.get("new_vms_internet", "")
         new_vms_internet = [int(x.strip()) for x in new_vms_internet_str.split(",") if x.strip().isdigit()]
@@ -349,6 +358,14 @@ def view_slice(slice_id):
                            logs=logs, user_role=session.get("role"),
                            username=username,
                            can_manage_slice=bool(user_obj and (user_obj.can_view_all_slices() or info["slice"]["created_by"] == username)))
+
+
+@app.route("/api/slice/<slice_id>/vms")
+@login_required
+def api_slice_vms(slice_id):
+    orch = get_orchestrator()
+    vms = orch.db.get_vms_for_slice(slice_id)
+    return jsonify({"vms": [v.to_dict() for v in vms]})
 
 
 @app.route("/console/<vm_id>")

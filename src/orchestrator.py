@@ -113,11 +113,14 @@ class Orchestrator:
                              f"Placement failed: {plan.error_message}", user_id=created_by)
             return {"success": False, "error": plan.error_message}
 
+        allocated_ports: dict = {}  # host_ip -> set of vnc ports reserved this run
         for vm, decision in zip(vms, plan.decisions):
             vm.host_ip = decision.host_ip
-            ports = self.db.allocate_vm_ports(vm.host_ip)
+            extra = allocated_ports.get(vm.host_ip, set())
+            ports = self.db.allocate_vm_ports(vm.host_ip, extra_used=extra)
             vm.vnc_port = ports["vnc_port"]
             vm.vnc_ws_port = ports["vnc_ws_port"]
+            allocated_ports.setdefault(vm.host_ip, set()).add(ports["vnc_port"])
 
         created_vms = self.slice_manager.create_slice(slice_obj, pre_placed_vms=vms)
         if not created_vms:
@@ -171,11 +174,14 @@ class Orchestrator:
                 plan = self.placement_engine.place_vms(slice_id, extra_vms)
                 if not plan.success:
                     return {"success": False, "error": plan.error_message}
+                allocated_ports: dict = {}
                 for vm, decision in zip(extra_vms, plan.decisions):
                     vm.host_ip = decision.host_ip
-                    ports = self.db.allocate_vm_ports(vm.host_ip)
+                    extra = allocated_ports.get(vm.host_ip, set())
+                    ports = self.db.allocate_vm_ports(vm.host_ip, extra_used=extra)
                     vm.vnc_port = ports["vnc_port"]
                     vm.vnc_ws_port = ports["vnc_ws_port"]
+                    allocated_ports.setdefault(vm.host_ip, set()).add(ports["vnc_port"])
 
         success, msg, info = self.slice_manager.edit_slice(
             slice_id, add_vms, remove_vm_ids, new_vcpus, new_ram_mb, new_disk_gb,

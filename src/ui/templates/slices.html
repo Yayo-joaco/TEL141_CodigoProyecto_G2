@@ -64,6 +64,7 @@
                         <td>
                             <div class="table-actions">
                                 <a href="/slice/{{ s.id }}" class="btn btn-sm btn-primary">Ver</a>
+                                <button class="btn btn-sm btn-primary" onclick="openEditModal('{{ s.id }}', '{{ s.name }}', {{ s.num_vms }})">Editar</button>
                                 <a href="/export-file/{{ s.id }}" class="btn btn-sm btn-primary">Exportar</a>
                                 <a href="/delete/{{ s.id }}" class="btn btn-sm btn-danger" onclick="return confirm('¿Borrar slice {{ s.name }}?')">Borrar</a>
                             </div>
@@ -177,5 +178,95 @@
     <div class="footer">
         PUCP Cloud Orchestrator - Panel Admin - TEL141 2026-1
     </div>
+
+    <!-- MODAL EDITAR SLICE -->
+    <div id="edit-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:1000;overflow-y:auto;">
+        <div style="background:#162430;border:1px solid #2a6f97;border-radius:10px;max-width:560px;margin:60px auto;padding:28px 32px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
+                <h2 style="color:#4db8ff;margin:0;">Editar Slice: <span id="modal-slice-name"></span></h2>
+                <button onclick="closeEditModal()" style="background:none;border:none;color:#8ab4d8;font-size:20px;cursor:pointer;">✕</button>
+            </div>
+            <form id="edit-form" method="POST">
+                <!-- Extensión topológica -->
+                <div style="background:#1a2e3a;border-radius:6px;padding:14px;margin-bottom:16px;">
+                    <h3 style="color:#4db8ff;font-size:13px;margin:0 0 12px;">Extensión Topológica</h3>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>VM Ancla (desde dónde extender)</label>
+                            <select name="anchor_vm_hint" id="modal-anchor-vm">
+                                <option value="">— Sin ancla —</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Topología de extensión</label>
+                            <select name="ext_topology">
+                                <option value="lineal">Lineal</option>
+                                <option value="anillo">Anillo</option>
+                                <option value="malla">Malla</option>
+                                <option value="bus">Bus</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>VMs a agregar</label>
+                            <input type="number" name="add_vms" value="0" min="0" max="10" id="modal-add-vms">
+                        </div>
+                        <div class="form-group">
+                            <label>Imagen para nuevas VMs</label>
+                            <input type="text" name="new_vm_image_all" placeholder="cirros">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Nuevas VMs con Internet (índices relativos, ej: 5,6)</label>
+                        <input type="text" name="new_vms_internet" placeholder="ej: 5,6">
+                    </div>
+                </div>
+                <!-- Eliminar VMs -->
+                <div style="background:#1a2e3a;border-radius:6px;padding:14px;margin-bottom:16px;">
+                    <h3 style="color:#4db8ff;font-size:13px;margin:0 0 10px;">Eliminar VMs existentes</h3>
+                    <div id="modal-vm-list" style="font-size:12px;color:#8ab4d8;">Cargando...</div>
+                </div>
+                <button type="submit" class="btn btn-primary btn-full">Aplicar Cambios</button>
+            </form>
+        </div>
+    </div>
+
+    <script>
+    function openEditModal(sliceId, sliceName, numVms) {
+        document.getElementById('modal-slice-name').textContent = sliceName;
+        document.getElementById('edit-form').action = '/edit/' + sliceId;
+        var anchorSel = document.getElementById('modal-anchor-vm');
+        anchorSel.innerHTML = '<option value="">— Sin ancla —</option>';
+        for (var i = 1; i <= numVms; i++) {
+            var opt = document.createElement('option');
+            opt.value = 'vm' + i;
+            opt.textContent = 'vm' + i;
+            anchorSel.appendChild(opt);
+        }
+        // Load VM list for removal
+        fetch('/api/slice/' + sliceId + '/vms')
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                var html = '';
+                (data.vms || []).forEach(function(vm) {
+                    html += '<label style="display:block;margin-bottom:4px;">' +
+                        '<input type="checkbox" name="remove_vms" value="' + vm.id + '"> ' +
+                        vm.name + ' (' + (vm.host_ip||'?') + ') — ' + vm.status + '</label>';
+                });
+                document.getElementById('modal-vm-list').innerHTML = html || 'No hay VMs.';
+            })
+            .catch(function() {
+                document.getElementById('modal-vm-list').innerHTML = '<a href="/slice/' + sliceId + '">Ver VMs en detalle</a>';
+            });
+        document.getElementById('edit-modal').style.display = 'block';
+    }
+    function closeEditModal() {
+        document.getElementById('edit-modal').style.display = 'none';
+    }
+    document.getElementById('edit-modal').addEventListener('click', function(e) {
+        if (e.target === this) closeEditModal();
+    });
+    </script>
 </body>
 </html>
