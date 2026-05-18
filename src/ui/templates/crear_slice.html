@@ -146,8 +146,9 @@
                             <small>{{ host.ip }}</small>
                             <div style="margin-top:6px;">
                                 {% set cpu_used = host.total_vcpus - host.available_vcpus %}
-                                <small>CPU: {{ cpu_used }}/{{ host.total_vcpus }} vCPUs</small>
-                                <div class="resource-bar"><div class="resource-fill {{ 'warn' if host.usage_pct > 60 else '' }} {{ 'danger' if host.usage_pct > 85 else '' }}" style="width:{{ host.usage_pct }}%;"></div></div>
+                                {% set cpu_pct = (cpu_used / host.total_vcpus * 100) if host.total_vcpus > 0 else 0 %}
+                                <small>CPU: {{ cpu_used }}/{{ host.total_vcpus }} vCPUs ({{ '%0.0f' % cpu_pct }}%)</small>
+                                <div class="resource-bar"><div class="resource-fill {{ 'warn' if cpu_pct > 60 else '' }} {{ 'danger' if cpu_pct > 85 else '' }}" style="width:{{ cpu_pct }}%;"></div></div>
                                 {% set ram_used = host.total_ram_mb - host.available_ram_mb %}
                                 {% set ram_pct = (ram_used / host.total_ram_mb * 100) if host.total_ram_mb > 0 else 0 %}
                                 <small>RAM: {{ '%0.0f' % ram_used }}/{{ host.total_ram_mb }} MB ({{ '%0.1f' % ram_pct }}%)</small>
