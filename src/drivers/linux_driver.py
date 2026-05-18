@@ -123,6 +123,9 @@ class LinuxDriver(BaseDriver):
                 seed_iso = f"{self.VM_BASE_DIR}/{vm_name}/seed.iso"
                 user_data = (
                     "#cloud-config\n"
+                    "password: ubuntu\n"
+                    "chpasswd: { expire: False }\n"
+                    "ssh_pwauth: True\n"
                     "network:\n"
                     "  version: 2\n"
                     "  ethernets:\n"
