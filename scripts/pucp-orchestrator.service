@@ -1,0 +1,17 @@
+[Unit]
+Description=PUCP Cloud Orchestrator UI
+After=network.target mariadb.service
+Wants=mariadb.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/pucp-cloud-orchestrator
+ExecStart=/usr/bin/python3 -m src.ui.app
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/home/ubuntu/pucp-cloud-orchestrator/logs/orchestrator.log
+StandardError=append:/home/ubuntu/pucp-cloud-orchestrator/logs/orchestrator.log
+
+[Install]
+WantedBy=multi-user.target

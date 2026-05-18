@@ -59,6 +59,14 @@ python3 -m pip install -r /home/ubuntu/pucp-cloud-orchestrator/requirements.txt 
 echo "[7/7] Verificando instalacion..."
 python3 -c "import flask; import paramiko; import sqlalchemy; import yaml; import jwt; print('OK')" && echo "Todas las dependencias OK"
 
+echo "[8/8] Instalando servicio systemd..."
+mkdir -p /home/ubuntu/pucp-cloud-orchestrator/logs
+sudo cp /home/ubuntu/pucp-cloud-orchestrator/scripts/pucp-orchestrator.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable pucp-orchestrator
+sudo systemctl start pucp-orchestrator
+echo "Servicio instalado y activo."
+
 echo ""
 echo "============================================"
 echo " Instalacion completada exitosamente!"
@@ -69,9 +77,11 @@ echo "  admin     / admin123   (Admin Infraestructura)"
 echo "  operador  / operador123 (Operador)"
 echo "  usuario   / usuario123  (Usuario)"
 echo ""
-echo "Para ejecutar la UI:"
-echo "  cd /home/ubuntu/pucp-cloud-orchestrator"
-echo "  python3 -m src.ui.app"
+echo "El orquestador corre como servicio systemd."
+echo "Comandos utiles:"
+echo "  sudo systemctl status pucp-orchestrator   # ver estado"
+echo "  sudo systemctl restart pucp-orchestrator  # reiniciar"
+echo "  sudo journalctl -u pucp-orchestrator -f   # ver logs en vivo"
 echo ""
 echo "Accede en: http://$(hostname -I | awk '{print $1}'):8080"
 echo ""
