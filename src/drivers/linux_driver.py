@@ -119,15 +119,22 @@ class LinuxDriver(BaseDriver):
             # the delta image using virt-customize (offline, no cloud-init needed).
             # Cirros handles DHCP natively on eth0 — no modification needed.
             if (vm.image or "").lower() == "ubuntu":
-                netplan_yaml = (
-                    "network:\n"
-                    "  version: 2\n"
-                    "  ethernets:\n"
-                    "    ens3:\n"
-                    "      dhcp4: true\n"
-                )
-                # Disable cloud-init network management so it doesn't
-                # regenerate 50-cloud-init.yaml and override our netplan.
+                # ens3: DHCP. Link interfaces (ens4+): just UP, no IP.
+                netplan_lines = [
+                    "network:\n",
+                    "  version: 2\n",
+                    "  ethernets:\n",
+                    "    ens3:\n",
+                    "      dhcp4: true\n",
+                ]
+                for i in range(len(link_interfaces or [])):
+                    iface = f"ens{i + 4}"
+                    netplan_lines += [
+                        f"    {iface}:\n",
+                        f"      dhcp4: false\n",
+                        f"      link-local: []\n",
+                    ]
+                netplan_yaml = "".join(netplan_lines)
                 ci_disable = "network:\n  config: disabled\n"
                 np_b64 = base64.b64encode(netplan_yaml.encode()).decode()
                 ci_b64 = base64.b64encode(ci_disable.encode()).decode()
