@@ -64,7 +64,6 @@
                         <td>
                             <div class="table-actions">
                                 <a href="/slice/{{ s.id }}" class="btn btn-sm btn-primary">Ver</a>
-                                <button class="btn btn-sm btn-primary" onclick="openEditModal('{{ s.id }}', '{{ s.name }}', {{ s.num_vms }})">Editar</button>
                                 <a href="/export-file/{{ s.id }}" class="btn btn-sm btn-primary">Exportar</a>
                                 <a href="/delete/{{ s.id }}" class="btn btn-sm btn-danger" onclick="return confirm('¿Borrar slice {{ s.name }}?')">Borrar</a>
                             </div>

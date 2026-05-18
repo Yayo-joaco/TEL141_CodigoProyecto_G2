@@ -133,6 +133,7 @@ class Orchestrator:
                          f"subnet={slice_obj.subnet}, topologia={topology}",
                          user_id=created_by)
 
+        self.refresh_hosts()
         return {
             "success": True, "slice_id": slice_obj.id, "name": slice_obj.name,
             "topology": topology, "num_vms": num_vms,
@@ -200,6 +201,7 @@ class Orchestrator:
         self.db.save_log(slice_id, "orchestrator", "INFO",
                          f"Slice eliminado, VLAN liberada",
                          user_id=user.id if user else None)
+        self.refresh_hosts()
         return {"success": success, "slice_id": slice_id}
 
     def get_slice(self, slice_id: str) -> Optional[dict]:

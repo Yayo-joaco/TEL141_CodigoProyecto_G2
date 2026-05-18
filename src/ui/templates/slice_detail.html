@@ -113,54 +113,51 @@
         {% if can_manage_slice %}
         <div class="card">
             <h2>Editar Slice</h2>
-            <form method="POST" action="/edit/{{ slice.id }}">
-                <!-- Extensión topológica -->
-                <div style="background:#1a2e3a;border-radius:6px;padding:14px;margin-bottom:16px;">
-                    <h3 style="color:#4db8ff;font-size:13px;margin:0 0 12px;">Extensión Topológica</h3>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>VM Ancla (desde dónde extender)</label>
-                            <select name="anchor_vm_hint">
-                                <option value="">— Sin ancla —</option>
-                                {% for vm in vms %}
-                                <option value="{{ vm.name }}">{{ vm.name }} ({{ vm.host_ip or '?' }})</option>
-                                {% endfor %}
-                            </select>
+            <form method="POST" action="/edit/{{ slice.id }}" id="edit-form">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
+                    <!-- Columna izquierda: configuración -->
+                    <div>
+                        <div style="background:#1a2e3a;border-radius:6px;padding:14px;margin-bottom:12px;">
+                            <h3 style="color:#4db8ff;font-size:13px;margin:0 0 12px;">Extensión</h3>
+                            <div class="form-group">
+                                <label>VM Ancla</label>
+                                <select name="anchor_vm_hint" id="sel-anchor" onchange="updatePreview()">
+                                    <option value="">— Sin ancla —</option>
+                                    {% for vm in vms %}
+                                    <option value="{{ vm.name }}">{{ vm.name }} ({{ vm.host_ip or '?' }})</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label>Topología de extensión</label>
+                                <select name="ext_topology" id="sel-ext-topo" onchange="updatePreview()">
+                                    <option value="lineal">Lineal</option>
+                                    <option value="anillo">Anillo</option>
+                                    <option value="malla">Malla</option>
+                                    <option value="bus">Bus</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label>VMs a agregar</label>
+                                <input type="number" name="add_vms" id="inp-add-vms" value="0" min="0" max="10"
+                                       oninput="renderNewVmRows(); updatePreview()">
+                            </div>
                         </div>
-                        <div class="form-group">
-                            <label>Topología de extensión</label>
-                            <select name="ext_topology">
-                                <option value="lineal">Lineal</option>
-                                <option value="anillo">Anillo</option>
-                                <option value="malla">Malla</option>
-                                <option value="bus">Bus</option>
-                            </select>
+                        <div style="background:#1a2e3a;border-radius:6px;padding:14px;">
+                            <h3 style="color:#4db8ff;font-size:13px;margin:0 0 10px;">Eliminar VMs existentes</h3>
+                            {% for vm in vms %}
+                            <label style="display:block;margin-bottom:4px;font-size:12px;">
+                                <input type="checkbox" name="remove_vms" value="{{ vm.id }}">
+                                {{ vm.name }} ({{ vm.host_ip or '?' }}) — {{ vm.status }}
+                            </label>
+                            {% endfor %}
                         </div>
                     </div>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>VMs a agregar</label>
-                            <input type="number" name="add_vms" value="0" min="0" max="10">
-                        </div>
-                        <div class="form-group">
-                            <label>Imagen para nuevas VMs</label>
-                            <input type="text" name="new_vm_image_all" placeholder="cirros">
-                        </div>
+                    <!-- Columna derecha: preview topología -->
+                    <div>
+                        <div style="background:#0f1923;border-radius:8px;height:220px;position:relative;" id="edit-preview-canvas"></div>
+                        <div id="new-vm-rows" style="margin-top:12px;"></div>
                     </div>
-                    <div class="form-group">
-                        <label>Nuevas VMs con Internet (números absolutos, ej: {{ slice.num_vms + 1 }},{{ slice.num_vms + 2 }})</label>
-                        <input type="text" name="new_vms_internet" placeholder="ej: {{ slice.num_vms + 1 }}">
-                    </div>
-                </div>
-                <!-- Eliminar VMs -->
-                <div style="background:#1a2e3a;border-radius:6px;padding:14px;margin-bottom:16px;">
-                    <h3 style="color:#4db8ff;font-size:13px;margin:0 0 10px;">Eliminar VMs existentes</h3>
-                    {% for vm in vms %}
-                    <label style="display:block;margin-bottom:4px;font-size:12px;">
-                        <input type="checkbox" name="remove_vms" value="{{ vm.id }}">
-                        {{ vm.name }} ({{ vm.host_ip or '?' }}) — {{ vm.status }}
-                    </label>
-                    {% endfor %}
                 </div>
                 <button type="submit" class="btn btn-primary">Aplicar Cambios</button>
             </form>
@@ -407,7 +404,135 @@
         if (topology === 'arbol') {
             setTimeout(function() { network.fit({ animation: true }); }, 500);
         }
+        window._mainNetwork = network;
+        window._mainNodesDS = data.nodes;
+        window._mainEdgesDS = data.edges;
+        window._sliceVms = vms;
+        window._sliceTopo = topology;
+        window._sliceNumVms = numVms;
+        window._statusColors = statusColors;
     })();
+
+    var _currentVmCount = {{ vms | length }};
+
+    function renderNewVmRows() {
+        var n = parseInt(document.getElementById('inp-add-vms').value) || 0;
+        var wrap = document.getElementById('new-vm-rows');
+        if (!wrap) return;
+        wrap.innerHTML = '';
+        for (var i = 1; i <= n; i++) {
+            var vmNum = _currentVmCount + i;
+            var row = document.createElement('div');
+            row.style.cssText = 'background:#1a2e3a;border-radius:6px;padding:10px 14px;margin-bottom:8px;' +
+                'display:grid;grid-template-columns:70px 1fr auto;gap:12px;align-items:center;';
+            row.innerHTML =
+                '<span style="color:#4db8ff;font-weight:bold;font-size:13px;font-family:monospace;">vm' + vmNum + '</span>' +
+                '<div><label style="font-size:11px;color:#8ab4d8;display:block;margin-bottom:3px;">Imagen</label>' +
+                '<input type="text" name="vm_image_' + vmNum + '" placeholder="cirros" ' +
+                'style="width:100%;background:#0f1923;border:1px solid #2a6f97;color:#ccc;' +
+                'padding:5px 8px;border-radius:4px;font-size:12px;box-sizing:border-box;"></div>' +
+                '<label style="font-size:12px;color:#8ab4d8;display:flex;align-items:center;gap:5px;cursor:pointer;">' +
+                '<input type="checkbox" name="new_vms_internet_cb" value="' + vmNum + '" ' +
+                'style="width:14px;height:14px;"> Internet</label>';
+            wrap.appendChild(row);
+        }
+        updatePreview();
+    }
+    function updatePreview() {
+        if (!window._mainNodesDS || !window._mainEdgesDS) return;
+        var anchorName = (document.getElementById('sel-anchor') || {}).value || '';
+        var extTopo = (document.getElementById('sel-ext-topo') || {}).value || 'lineal';
+        var addN = parseInt((document.getElementById('inp-add-vms') || {}).value) || 0;
+        var existingVms = window._sliceVms;
+        var baseTopo = window._sliceTopo;
+        var baseCount = window._sliceNumVms;
+        var sc = window._statusColors;
+        var newNodes = [];
+        for (var i = 0; i < baseCount; i++) {
+            var vm = existingVms[i] || {};
+            var st = sc[vm.status] || sc['pending'];
+            newNodes.push({ id: i, label: vm.name || ('vm'+(i+1)),
+                color: { background: st.bg, border: st.border,
+                         highlight: { border: '#fff', background: st.bg } },
+                font: { color: st.font, size: 13, face: 'monospace' },
+                shape: 'box', borderWidth: 2,
+                margin: { top: 8, bottom: 8, left: 14, right: 14 } });
+        }
+        for (var j = 0; j < addN; j++) {
+            newNodes.push({ id: baseCount+j, label: 'vm'+(_currentVmCount+j+1),
+                color: { background: '#3a2a0a', border: '#ff8c42',
+                         highlight: { border: '#fff', background: '#3a2a0a' } },
+                font: { color: '#ff8c42', size: 13, face: 'monospace' },
+                shape: 'box', borderWidth: 2, borderDashes: [5,4],
+                margin: { top: 8, bottom: 8, left: 14, right: 14 } });
+        }
+        var newEdges = []; var eid = 0;
+        if (baseTopo === 'lineal') {
+            for (var i = 0; i < baseCount-1; i++)
+                newEdges.push({ id: eid++, from: i, to: i+1, color: '#2a6f97', width: 2 });
+        } else if (baseTopo === 'anillo') {
+            for (var i = 0; i < baseCount-1; i++)
+                newEdges.push({ id: eid++, from: i, to: i+1, color: '#2a6f97', width: 2 });
+            if (baseCount > 1) newEdges.push({ id: eid++, from: baseCount-1, to: 0, color: '#2a6f97', width: 2 });
+        } else if (baseTopo === 'malla') {
+            for (var i = 0; i < baseCount; i++)
+                for (var j = i+1; j < baseCount; j++)
+                    newEdges.push({ id: eid++, from: i, to: j, color: '#2a6f97', width: 1.2 });
+        } else if (baseTopo === 'bus') {
+            for (var i = 1; i < baseCount; i++)
+                newEdges.push({ id: eid++, from: 0, to: i, color: '#2a6f97', width: 2 });
+        } else if (baseTopo === 'arbol') {
+            for (var i = 1; i < baseCount; i++)
+                newEdges.push({ id: eid++, from: Math.floor((i-1)/2), to: i, color: '#2a6f97', width: 2 });
+        }
+        if (addN > 0) {
+            var anchorIdx = baseCount - 1;
+            for (var i = 0; i < existingVms.length; i++) {
+                if (existingVms[i] && existingVms[i].name === anchorName) { anchorIdx = i; break; }
+            }
+            var newIds = [];
+            for (var j = 0; j < addN; j++) newIds.push(baseCount + j);
+            if (extTopo === 'lineal') {
+                newEdges.push({ id: eid++, from: anchorIdx, to: newIds[0], color: '#ff8c42', width: 2, dashes: [6,4] });
+                for (var j = 0; j < newIds.length-1; j++)
+                    newEdges.push({ id: eid++, from: newIds[j], to: newIds[j+1], color: '#ff8c42', width: 2, dashes: [6,4] });
+            } else if (extTopo === 'anillo') {
+                newEdges.push({ id: eid++, from: anchorIdx, to: newIds[0], color: '#ff8c42', width: 2, dashes: [6,4] });
+                for (var j = 0; j < newIds.length-1; j++)
+                    newEdges.push({ id: eid++, from: newIds[j], to: newIds[j+1], color: '#ff8c42', width: 2, dashes: [6,4] });
+                if (newIds.length > 0)
+                    newEdges.push({ id: eid++, from: newIds[newIds.length-1], to: anchorIdx, color: '#ff8c42', width: 2, dashes: [6,4] });
+            } else if (extTopo === 'malla') {
+                for (var j = 0; j < newIds.length; j++) {
+                    newEdges.push({ id: eid++, from: anchorIdx, to: newIds[j], color: '#ff8c42', width: 1.5, dashes: [6,4] });
+                    for (var k = j+1; k < newIds.length; k++)
+                        newEdges.push({ id: eid++, from: newIds[j], to: newIds[k], color: '#ff8c42', width: 1.5, dashes: [6,4] });
+                }
+            } else if (extTopo === 'bus') {
+                for (var j = 0; j < newIds.length; j++)
+                    newEdges.push({ id: eid++, from: anchorIdx, to: newIds[j], color: '#ff8c42', width: 2, dashes: [6,4] });
+            }
+        }
+        window._mainNodesDS.clear(); window._mainNodesDS.add(newNodes);
+        window._mainEdgesDS.clear(); window._mainEdgesDS.add(newEdges);
+        setTimeout(function() {
+            if (window._mainNetwork)
+                window._mainNetwork.fit({ animation: { duration: 500, easingFunction: 'easeInOutQuad' } });
+        }, 80);
+    }
+    var _editForm = document.getElementById('edit-form');
+    if (_editForm) {
+        _editForm.addEventListener('submit', function() {
+            var checked = document.querySelectorAll('input[name="new_vms_internet_cb"]:checked');
+            var vals = [];
+            checked.forEach(function(cb) { vals.push(cb.value); });
+            var hidden = document.createElement('input');
+            hidden.type = 'hidden';
+            hidden.name = 'new_vms_internet';
+            hidden.value = vals.join(',');
+            this.appendChild(hidden);
+        });
+    }
     </script>
 </body>
 </html>
