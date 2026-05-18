@@ -153,10 +153,9 @@
                             {% endfor %}
                         </div>
                     </div>
-                    <!-- Columna derecha: preview topología -->
+                    <!-- Columna derecha: filas de nuevas VMs -->
                     <div>
-                        <div style="background:#0f1923;border-radius:8px;height:220px;position:relative;" id="edit-preview-canvas"></div>
-                        <div id="new-vm-rows" style="margin-top:12px;"></div>
+                        <div id="new-vm-rows"></div>
                     </div>
                 </div>
                 <button type="submit" class="btn btn-primary">Aplicar Cambios</button>
@@ -428,9 +427,13 @@
             row.innerHTML =
                 '<span style="color:#4db8ff;font-weight:bold;font-size:13px;font-family:monospace;">vm' + vmNum + '</span>' +
                 '<div><label style="font-size:11px;color:#8ab4d8;display:block;margin-bottom:3px;">Imagen</label>' +
-                '<input type="text" name="vm_image_' + vmNum + '" placeholder="cirros" ' +
+                '<select name="vm_image_' + vmNum + '" ' +
                 'style="width:100%;background:#0f1923;border:1px solid #2a6f97;color:#ccc;' +
-                'padding:5px 8px;border-radius:4px;font-size:12px;box-sizing:border-box;"></div>' +
+                'padding:5px 8px;border-radius:4px;font-size:12px;box-sizing:border-box;">' +
+                '<option value="">cirros (default)</option>' +
+                '<option value="ubuntu">ubuntu</option>' +
+                '<option value="cirros">cirros</option>' +
+                '</select></div>' +
                 '<label style="font-size:12px;color:#8ab4d8;display:flex;align-items:center;gap:5px;cursor:pointer;">' +
                 '<input type="checkbox" name="new_vms_internet_cb" value="' + vmNum + '" ' +
                 'style="width:14px;height:14px;"> Internet</label>';
@@ -515,10 +518,12 @@
         }
         window._mainNodesDS.clear(); window._mainNodesDS.add(newNodes);
         window._mainEdgesDS.clear(); window._mainEdgesDS.add(newEdges);
-        setTimeout(function() {
-            if (window._mainNetwork)
-                window._mainNetwork.fit({ animation: { duration: 500, easingFunction: 'easeInOutQuad' } });
-        }, 80);
+        if (addN > 0) {
+            setTimeout(function() {
+                if (window._mainNetwork)
+                    window._mainNetwork.fit({ animation: { duration: 500, easingFunction: 'easeInOutQuad' } });
+            }, 80);
+        }
     }
     var _editForm = document.getElementById('edit-form');
     if (_editForm) {
