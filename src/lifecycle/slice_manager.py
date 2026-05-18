@@ -13,7 +13,7 @@ from ..models.user import User, Role
 from ..models.topology import Topology
 from ..models.placement_decision import PlacementDecision
 from ..drivers.linux_driver import LinuxDriver
-from ..networking.network_manager import NetworkManager
+from ..networking.network_manager import NetworkManager, SSH_FWD_BASE
 from ..database.db_manager import DatabaseManager
 
 logger = logging.getLogger("orchestrator.lifecycle")
@@ -199,12 +199,33 @@ class SliceManager:
 
         if new_vms_list:
             vlan_id = slice_obj.vlan_id or 300
+            subnet = slice_obj.subnet or "10.60.3.0/24"
+            subnet_base = subnet.split("/")[0].rsplit(".", 1)[0]
+
             for vm in new_vms_list:
                 if vm.tap_interface and vm.host_ip:
                     self.network._set_vlan(vm.host_ip, vm.tap_interface, vlan_id)
                 for iface in (vm.interfaces or []):
                     if iface.get("type") == "link" and iface.get("vlan_id") and vm.host_ip:
                         self.network._set_vlan(vm.host_ip, iface["tap_name"], iface["vlan_id"])
+                # Assign predictable IP to new VM
+                if not vm.ip_address:
+                    vm.ip_address = f"{subnet_base}.{vm.index + 2}"
+
+            # Restart dnsmasq with leases for ALL VMs (old + new)
+            if slice_obj.enable_dhcp:
+                self.network._setup_dhcp(
+                    self.network.headnode_ip, vlan_id, subnet, all_vms
+                )
+
+            # SSH forwarding for new VMs that need internet access
+            if slice_obj.enable_internet:
+                for vm in new_vms_list:
+                    if vm.enable_internet and vm.vnc_port and vm.ip_address:
+                        fwd_port = SSH_FWD_BASE + vm.vnc_port
+                        self.network._setup_ssh_forward(
+                            self.network.headnode_ip, fwd_port, vm.ip_address, vm
+                        )
 
         self._persist_slice(slice_obj, all_vms)
         return True, f"Slice editado: {len(all_vms)} VMs total", self.get_slice_info(slice_id)
