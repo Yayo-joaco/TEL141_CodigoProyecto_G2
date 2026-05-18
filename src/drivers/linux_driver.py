@@ -132,7 +132,7 @@ class LinuxDriver(BaseDriver):
                     "    ens3:\n"
                     "      dhcp4: true\n"
                 )
-                meta_data = f"instance-id: {vm_name}\nlocal-hostname: {vm_name}\n"
+                meta_data = f"instance-id: {vm_name}-{uuid.uuid4().hex[:8]}\nlocal-hostname: {vm_name}\n"
                 ud_b64 = base64.b64encode(user_data.encode()).decode()
                 md_b64 = base64.b64encode(meta_data.encode()).decode()
                 self._exec(client,
