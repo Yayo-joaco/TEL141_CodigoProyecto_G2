@@ -149,7 +149,8 @@ class LinuxDriver(BaseDriver):
                            f"--run-command 'mkdir -p /etc/cloud/cloud.cfg.d' "
                            f"--upload /tmp/{vm_name}-ci-disable.yaml:"
                            f"/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg "
-                           f"--run-command 'sed -i \"s/^#*PasswordAuthentication.*/PasswordAuthentication yes/\" /etc/ssh/sshd_config' "
+                           f"--run-command 'echo PasswordAuthentication yes >> /etc/ssh/sshd_config' "
+                           f"--run-command 'rm -f /etc/ssh/sshd_config.d/*.conf' "
                            f"--quiet 2>/dev/null || true",
                            timeout=120)
 
