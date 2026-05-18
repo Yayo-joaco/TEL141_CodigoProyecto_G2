@@ -115,39 +115,26 @@ class LinuxDriver(BaseDriver):
 
             vm.interfaces = iface_records
 
-            # For Ubuntu cloud images: generate a cloud-init seed ISO so ens3
-            # comes up with DHCP automatically on first boot.
-            # Cirros handles DHCP natively on eth0 — no seed needed.
-            seed_drive = ""
+            # For Ubuntu cloud images: inject netplan DHCP config directly into
+            # the delta image using virt-customize (offline, no cloud-init needed).
+            # Cirros handles DHCP natively on eth0 — no modification needed.
             if (vm.image or "").lower() == "ubuntu":
-                seed_iso = f"{self.VM_BASE_DIR}/{vm_name}/seed.iso"
-                user_data = (
-                    "#cloud-config\n"
-                    "password: ubuntu\n"
-                    "chpasswd: { expire: False }\n"
-                    "ssh_pwauth: True\n"
+                netplan_yaml = (
                     "network:\n"
                     "  version: 2\n"
                     "  ethernets:\n"
                     "    ens3:\n"
                     "      dhcp4: true\n"
                 )
-                meta_data = f"instance-id: {vm_name}-{uuid.uuid4().hex[:8]}\nlocal-hostname: {vm_name}\n"
-                ud_b64 = base64.b64encode(user_data.encode()).decode()
-                md_b64 = base64.b64encode(meta_data.encode()).decode()
+                np_b64 = base64.b64encode(netplan_yaml.encode()).decode()
                 self._exec(client,
-                           f"echo {ud_b64} | base64 -d > /tmp/{vm_name}-user-data")
+                           f"echo {np_b64} | base64 -d > /tmp/{vm_name}-netplan.yaml")
                 self._exec(client,
-                           f"echo {md_b64} | base64 -d > /tmp/{vm_name}-meta-data")
-                self._exec(client,
-                           f"genisoimage -output {seed_iso} -volid cidata "
-                           f"-joliet -rock "
-                           f"/tmp/{vm_name}-user-data /tmp/{vm_name}-meta-data "
-                           f"2>/dev/null || "
-                           f"cloud-localds {seed_iso} "
-                           f"/tmp/{vm_name}-user-data /tmp/{vm_name}-meta-data "
-                           f"2>/dev/null; true")
-                seed_drive = f"-cdrom {seed_iso} "
+                           f"sudo virt-customize -a {vm_disk} "
+                           f"--password ubuntu:password:ubuntu "
+                           f"--upload /tmp/{vm_name}-netplan.yaml:"
+                           f"/etc/netplan/99-ens3-dhcp.yaml "
+                           f"--quiet 2>/dev/null || true")
 
             qemu_cmd = (
                 f"sudo qemu-system-x86_64 "
@@ -155,7 +142,6 @@ class LinuxDriver(BaseDriver):
                 f"-m {ram_mb} "
                 f"-smp {vcpus} "
                 f"-drive file={vm_disk},if=virtio,format=qcow2 "
-                f"{seed_drive}"
                 f"{net_args}"
                 f"-vnc 0.0.0.0:{vnc_display} "
                 f"-daemonize "
