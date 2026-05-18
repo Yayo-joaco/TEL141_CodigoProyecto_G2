@@ -53,7 +53,7 @@ class LinuxDriver(BaseDriver):
             vm_disk = f"{self.VM_BASE_DIR}/{vm_name}/{vm_name}.qcow2"
             self._exec(client, (
                 f"sudo qemu-img create -f qcow2 -b {base_image_path} "
-                f"-F qcow2 {vm_disk} {disk_gb}G"
+                f"-F qcow2 {vm_disk}"
             ))
 
             vm.tap_interface = f"tap-{vm_name}"
