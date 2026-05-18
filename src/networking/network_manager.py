@@ -225,6 +225,7 @@ class NetworkManager:
         self._exec(client,
                    f"sudo dnsmasq "
                    f"--interface={iface} "
+                   f"--bind-interfaces "
                    f"--dhcp-range={range_start},{range_end},255.255.255.0,12h "
                    f"--dhcp-option=3,{gw_ip} "
                    f"--dhcp-option=6,8.8.8.8 "

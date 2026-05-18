@@ -7,6 +7,7 @@
 #   R5 - Networking L2 via OVS
 # ==============================================================
 
+import base64
 import logging
 import time
 import uuid
@@ -114,12 +115,47 @@ class LinuxDriver(BaseDriver):
 
             vm.interfaces = iface_records
 
+            # For Ubuntu cloud images: generate a cloud-init seed ISO so ens3
+            # comes up with DHCP automatically on first boot.
+            # Cirros handles DHCP natively on eth0 — no seed needed.
+            seed_drive = ""
+            if (vm.image or "").lower() == "ubuntu":
+                seed_iso = f"{self.VM_BASE_DIR}/{vm_name}/seed.iso"
+                user_data = (
+                    "#cloud-config\n"
+                    "network:\n"
+                    "  version: 2\n"
+                    "  ethernets:\n"
+                    "    ens3:\n"
+                    "      dhcp4: true\n"
+                )
+                meta_data = f"instance-id: {vm_name}\nlocal-hostname: {vm_name}\n"
+                ud_b64 = base64.b64encode(user_data.encode()).decode()
+                md_b64 = base64.b64encode(meta_data.encode()).decode()
+                self._exec(client,
+                           f"echo {ud_b64} | base64 -d > /tmp/{vm_name}-user-data")
+                self._exec(client,
+                           f"echo {md_b64} | base64 -d > /tmp/{vm_name}-meta-data")
+                self._exec(client,
+                           f"genisoimage -output {seed_iso} -volid cidata "
+                           f"-joliet -rock "
+                           f"/tmp/{vm_name}-user-data /tmp/{vm_name}-meta-data "
+                           f"2>/dev/null || "
+                           f"cloud-localds {seed_iso} "
+                           f"/tmp/{vm_name}-user-data /tmp/{vm_name}-meta-data "
+                           f"2>/dev/null; true")
+                seed_drive = (
+                    f"-drive file={seed_iso},"
+                    f"if=virtio,format=raw,readonly=on "
+                )
+
             qemu_cmd = (
                 f"sudo qemu-system-x86_64 "
                 f"-name {vm_name} "
                 f"-m {ram_mb} "
                 f"-smp {vcpus} "
                 f"-drive file={vm_disk},if=virtio,format=qcow2 "
+                f"{seed_drive}"
                 f"{net_args}"
                 f"-vnc 0.0.0.0:{vnc_display} "
                 f"-daemonize "
@@ -359,12 +395,14 @@ class LinuxDriver(BaseDriver):
             disk_used_mb = int(disk_used_raw) if disk_used_raw.isdigit() else 0
             disk_used_gb = max(0, disk_used_mb // 1024)
 
-            cpu_used_approx = int(float(
-                self._exec(
-                    client,
-                    "top -bn1 | grep 'Cpu(s)' | awk '{print $2}' | cut -d'%' -f1"
-                ).strip() or "0"
-            ))
+            cpu_raw = self._exec(
+                client,
+                "top -bn1 | grep 'Cpu(s)' | awk '{print $2}' | tr -d '%,' "
+            ).strip() or "0"
+            try:
+                cpu_used_approx = int(float(cpu_raw))
+            except ValueError:
+                cpu_used_approx = 0
 
             client.close()
 
