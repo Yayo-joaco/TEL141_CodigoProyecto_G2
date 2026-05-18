@@ -120,6 +120,7 @@ class SliceRecord(Base):
     ext_topology = Column(String(50), nullable=True)
     anchor_vm_name = Column(String(255), nullable=True)
     base_num_vms = Column(Integer, nullable=True)
+    link_vlans_json = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
 
@@ -144,6 +145,7 @@ class SliceRecord(Base):
             ext_topology=getattr(self, 'ext_topology', None),
             anchor_vm_name=getattr(self, 'anchor_vm_name', None),
             base_num_vms=getattr(self, 'base_num_vms', None),
+            link_vlans=json.loads(self.link_vlans_json) if getattr(self, 'link_vlans_json', None) else None,
         )
 
 
@@ -163,6 +165,7 @@ class VMRecord(Base):
     vnc_token = Column(String(50), nullable=True)
     tap_interface = Column(String(100), nullable=True)
     qemu_pid = Column(Integer, nullable=True)
+    interfaces_json = Column(Text, nullable=True)
     status = Column(String(50), default="pending")
     enable_internet = Column(Integer, default=0)
     image = Column(String(255), nullable=True)
@@ -186,6 +189,7 @@ class VMRecord(Base):
             vnc_token=self.vnc_token,
             tap_interface=self.tap_interface,
             qemu_pid=self.qemu_pid,
+            interfaces=json.loads(self.interfaces_json) if getattr(self, 'interfaces_json', None) else None,
             status=VMStatus(self.status) if self.status else VMStatus.PENDING,
             enable_internet=bool(self.enable_internet),
             image=self.image,
@@ -271,6 +275,8 @@ class DatabaseManager:
             ("slices", "ext_topology", "VARCHAR(50)"),
             ("slices", "anchor_vm_name", "VARCHAR(255)"),
             ("slices", "base_num_vms", "INT"),
+            ("slices", "link_vlans_json", "TEXT"),
+            ("vms", "interfaces_json", "TEXT"),
         ]
         with self.engine.connect() as conn:
             for table, col, col_type in migrations:
@@ -285,15 +291,23 @@ class DatabaseManager:
                     pass  # column already exists
 
     def _populate_vlan_pool(self):
-        """Ensure VLAN pool has data (16 VLANs: 300-315)."""
+        """Ensure VLAN pool has data (100 VLANs: 300-399)."""
         session = self.Session()
         try:
             count = session.query(VLANPoolRecord).count()
             if count == 0:
-                for vlan_id in range(300, 316):
+                for vlan_id in range(300, 400):
                     session.add(VLANPoolRecord(vlan_id=vlan_id, in_use=0))
                 session.commit()
-                logger.info("VLAN pool populated: VLANs 300-315")
+                logger.info("VLAN pool populated: VLANs 300-399")
+            elif count < 100:
+                # Expand existing pool
+                existing = {r.vlan_id for r in session.query(VLANPoolRecord).all()}
+                for vlan_id in range(300, 400):
+                    if vlan_id not in existing:
+                        session.add(VLANPoolRecord(vlan_id=vlan_id, in_use=0))
+                session.commit()
+                logger.info("VLAN pool expanded to VLANs 300-399")
         except Exception as e:
             session.rollback()
             logger.warning("VLAN pool population skipped: %s", e)
@@ -386,6 +400,7 @@ class DatabaseManager:
                 ext_topology=slice_obj.ext_topology,
                 anchor_vm_name=slice_obj.anchor_vm_name,
                 base_num_vms=slice_obj.base_num_vms,
+                link_vlans_json=json.dumps(slice_obj.link_vlans) if slice_obj.link_vlans else None,
             )
             session.merge(record)
             session.commit()
@@ -470,6 +485,7 @@ class DatabaseManager:
                 vnc_token=vm.vnc_token,
                 tap_interface=vm.tap_interface,
                 qemu_pid=vm.qemu_pid,
+                interfaces_json=json.dumps(vm.interfaces) if vm.interfaces else None,
                 status=vm.status.value,
                 enable_internet=int(vm.enable_internet),
                 image=vm.image,
@@ -793,16 +809,39 @@ class DatabaseManager:
         finally:
             session.close()
 
-    def release_vlan(self, slice_id: str):
-        """Release VLAN back to pool when slice is deleted."""
+    def assign_vlan_for_link(self, slice_id: str, link_idx: int) -> Optional[int]:
+        """Assign a VLAN for a specific link (no subnet needed)."""
         session = self.get_session()
         try:
-            record = session.query(VLANPoolRecord).filter_by(slice_id=slice_id).first()
-            if record:
+            record = session.query(VLANPoolRecord).filter_by(in_use=0).order_by(
+                VLANPoolRecord.vlan_id
+            ).first()
+            if not record:
+                return None
+            record.in_use = 1
+            record.slice_id = f"{slice_id}-link{link_idx}"
+            record.assigned_at = datetime.utcnow()
+            session.commit()
+            return record.vlan_id
+        except Exception as e:
+            session.rollback()
+            return None
+        finally:
+            session.close()
+
+    def release_vlan(self, slice_id: str):
+        """Release all VLANs (primary + links) for a slice."""
+        session = self.get_session()
+        try:
+            # Release primary VLAN
+            records = session.query(VLANPoolRecord).filter(
+                VLANPoolRecord.slice_id.like(f"{slice_id}%")
+            ).all()
+            for record in records:
                 record.in_use = 0
                 record.slice_id = None
                 record.subnet = None
-                session.commit()
+            session.commit()
         except Exception as e:
             session.rollback()
         finally:

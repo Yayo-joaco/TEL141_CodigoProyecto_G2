@@ -10,7 +10,7 @@
 import logging
 import time
 import uuid
-from typing import Optional
+from typing import Optional, List
 
 import paramiko
 
@@ -38,12 +38,17 @@ class LinuxDriver(BaseDriver):
         self.vnc_ws_base_port = 17000
 
     def create_vm(self, vm: VM, placement: PlacementDecision,
-                  base_image_path: str) -> bool:
+                  base_image_path: str,
+                  link_interfaces: List[dict] = None) -> bool:
+        """
+        link_interfaces: list of dicts per link this VM participates in:
+          [{link_idx, vlan_id, peer_vm_name}]
+        Creates one primary tap (ens3/eth0) + one tap per link (ens4+/eth1+).
+        """
         host_ip = placement.host_ip
         vm_name = vm.name
         vcpus = placement.vcpus_allocated
         ram_mb = placement.ram_mb_allocated
-        disk_gb = placement.disk_gb_allocated
 
         try:
             client = self._connect(host_ip)
@@ -56,16 +61,58 @@ class LinuxDriver(BaseDriver):
                 f"-F qcow2 {vm_disk}"
             ))
 
-            vm.tap_interface = f"tap-{vm_name}"
-            self._exec(client, f"sudo ip tuntap add mode tap {vm.tap_interface}")
-            self._exec(client, f"sudo ip link set {vm.tap_interface} up")
+            # Primary tap (ens3 / eth0) — internet/management
+            primary_tap = f"tap-{vm_name}"
+            vm.tap_interface = primary_tap
+            self._exec(client, f"sudo ip tuntap add mode tap {primary_tap}")
+            self._exec(client, f"sudo ip link set {primary_tap} up")
 
             vm.vnc_port = vm.vnc_port or (self.vnc_base_port + vm.index)
             vm.vnc_ws_port = vm.vnc_ws_port or (self.vnc_ws_base_port + vm.index)
             vm.vnc_token = str(uuid.uuid4())[:12]
 
-            mac_addr = self._gen_mac(vm.index)
+            primary_mac = self._gen_mac(vm.index)
             vnc_display = vm.vnc_port - self.vnc_base_port
+
+            # Build QEMU netdev/device args
+            net_args = (
+                f"-netdev tap,id=net0,ifname={primary_tap},script=no,downscript=no "
+                f"-device virtio-net-pci,netdev=net0,mac={primary_mac} "
+            )
+
+            # Link taps (ens4+/eth1+) — one per link
+            iface_records = [{
+                "type": "primary",
+                "tap_name": primary_tap,
+                "mac": primary_mac,
+                "vlan_id": None,
+                "link_idx": None,
+                "peer_vm_name": None,
+                "iface_name": "ens3" if (vm.image or "").lower() == "ubuntu" else "eth0",
+            }]
+
+            for i, lnk in enumerate(link_interfaces or []):
+                link_tap = f"tap-{vm_name}-l{lnk['link_idx']}"
+                link_mac = self._gen_link_mac(vm.index, i)
+                self._exec(client, f"sudo ip tuntap add mode tap {link_tap}")
+                self._exec(client, f"sudo ip link set {link_tap} up")
+                net_id = f"net{i + 1}"
+                net_args += (
+                    f"-netdev tap,id={net_id},ifname={link_tap},script=no,downscript=no "
+                    f"-device virtio-net-pci,netdev={net_id},mac={link_mac} "
+                )
+                iface_name = f"ens{i + 4}" if (vm.image or "").lower() == "ubuntu" else f"eth{i + 1}"
+                iface_records.append({
+                    "type": "link",
+                    "tap_name": link_tap,
+                    "mac": link_mac,
+                    "vlan_id": lnk.get("vlan_id"),
+                    "link_idx": lnk["link_idx"],
+                    "peer_vm_name": lnk.get("peer_vm_name"),
+                    "iface_name": iface_name,
+                })
+
+            vm.interfaces = iface_records
 
             qemu_cmd = (
                 f"sudo qemu-system-x86_64 "
@@ -73,8 +120,7 @@ class LinuxDriver(BaseDriver):
                 f"-m {ram_mb} "
                 f"-smp {vcpus} "
                 f"-drive file={vm_disk},if=virtio,format=qcow2 "
-                f"-netdev tap,id=net0,ifname={vm.tap_interface},script=no,downscript=no "
-                f"-device virtio-net-pci,netdev=net0,mac={mac_addr} "
+                f"{net_args}"
                 f"-vnc 0.0.0.0:{vnc_display} "
                 f"-daemonize "
                 f"-enable-kvm"
@@ -87,12 +133,19 @@ class LinuxDriver(BaseDriver):
             pid_out = self._exec(client, f"sudo pgrep -f 'qemu-system-x86_64.*-name {vm_name}'")
             if pid_out.strip():
                 vm.qemu_pid = int(pid_out.strip().split('\n')[0])
-                vm.mac_address = mac_addr
+                vm.mac_address = primary_mac
                 vm.status = VMStatus.ACTIVE
-                logger.info("VM %s created on %s (PID=%d, VNC=%d)",
-                            vm_name, host_ip, vm.qemu_pid, vm.vnc_port)
+                logger.info("VM %s created on %s (PID=%d, VNC=%d, links=%d)",
+                            vm_name, host_ip, vm.qemu_pid, vm.vnc_port,
+                            len(link_interfaces or []))
 
-                self._exec(client, f"sudo ovs-vsctl add-port {self.OVS_BRIDGE} {vm.tap_interface}")
+                # Add primary tap to OVS (VLAN set later by NetworkManager)
+                self._exec(client, f"sudo ovs-vsctl add-port {self.OVS_BRIDGE} {primary_tap}")
+                # Add link taps to OVS (VLAN set later by NetworkManager)
+                for rec in iface_records:
+                    if rec["type"] == "link":
+                        self._exec(client,
+                                   f"sudo ovs-vsctl add-port {self.OVS_BRIDGE} {rec['tap_name']}")
 
                 vnc_raw = 5900 + vnc_display
                 self._exec(client,
@@ -129,9 +182,17 @@ class LinuxDriver(BaseDriver):
             if vm.vnc_ws_port:
                 self._exec(client, f"sudo pkill -f 'websockify.*{vm.vnc_ws_port}' 2>/dev/null")
 
+            # Remove primary tap
             if vm.tap_interface:
                 self._exec(client, f"sudo ovs-vsctl del-port {self.OVS_BRIDGE} {vm.tap_interface} 2>/dev/null")
                 self._exec(client, f"sudo ip link delete {vm.tap_interface} 2>/dev/null")
+
+            # Remove link taps
+            for iface in (vm.interfaces or []):
+                if iface.get("type") == "link":
+                    tap = iface["tap_name"]
+                    self._exec(client, f"sudo ovs-vsctl del-port {self.OVS_BRIDGE} {tap} 2>/dev/null")
+                    self._exec(client, f"sudo ip link delete {tap} 2>/dev/null")
 
             self._exec(client, f"rm -rf {self.VM_BASE_DIR}/{vm_name}")
 
@@ -235,3 +296,6 @@ class LinuxDriver(BaseDriver):
 
     def _gen_mac(self, idx: int) -> str:
         return f"52:54:00:60:03:{idx:02x}"
+
+    def _gen_link_mac(self, vm_idx: int, link_local_idx: int) -> str:
+        return f"52:54:00:60:{vm_idx:02x}:{link_local_idx + 1:02x}"

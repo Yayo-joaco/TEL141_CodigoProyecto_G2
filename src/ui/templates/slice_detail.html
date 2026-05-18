@@ -107,6 +107,18 @@
             <div id="topology-container">
                 <div id="vm-tooltip"></div>
             </div>
+            <!-- Interface popup (shown on node click) -->
+            <div id="iface-popup" style="display:none;margin-top:12px;background:#0f1923;border:1px solid #2a6f97;border-radius:8px;padding:14px 18px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+                    <span id="iface-popup-title" style="color:#4db8ff;font-weight:bold;font-size:13px;"></span>
+                    <button onclick="document.getElementById('iface-popup').style.display='none'" style="background:none;border:none;color:#8ab4d8;cursor:pointer;font-size:16px;">✕</button>
+                </div>
+                <div id="iface-popup-body"></div>
+                <p style="color:#8ab4d8;font-size:11px;margin-top:8px;">
+                    Usa la columna <strong>Interfaz</strong> para tcpdump/arping dentro de la VM.
+                    Ej: <code>sudo tcpdump -en -i ens4</code>
+                </p>
+            </div>
         </div>
 
         <!-- EDIT SLICE -->
@@ -258,6 +270,7 @@
         var extTopology = '{{ slice.ext_topology or "" }}';
         var anchorVmName = '{{ slice.anchor_vm_name or "" }}';
         var baseNumVms = {{ slice.base_num_vms or slice.num_vms }};
+        var sliceVlan = {{ slice.vlan_id or 0 }};
 
         var statusColors = {
             'active':    { bg: '#1a4d6e', border: '#4db8ff', font: '#4db8ff' },
@@ -388,32 +401,75 @@
 
         var network = new vis.Network(container, data, options);
 
-        // Click on node: scroll to VM in table
+        // Click on node: show interface popup + scroll to VM in table
         network.on('click', function(params) {
             if (params.nodes.length > 0) {
                 var nodeId = params.nodes[0];
                 var vm = vms[nodeId];
                 if (vm) {
-                    var vmName = vm.name || ('VM' + (nodeId+1));
-                    // Highlight row
+                    // Scroll to row
                     var rows = document.querySelectorAll('table tbody tr');
                     rows.forEach(function(r) { r.style.background = ''; });
-                    if (rows[nodeId]) rows[nodeId].style.background = '#1a3a4a';
-                    rows[nodeId].scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    if (rows[nodeId]) {
+                        rows[nodeId].style.background = '#1a3a4a';
+                        rows[nodeId].scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    }
+                    // Show interface popup
+                    var ifaces = vm.interfaces || [];
+                    if (ifaces.length > 0) {
+                        var rows_html = '';
+                        ifaces.forEach(function(ifc) {
+                            var linkLabel = ifc.type === 'primary'
+                                ? '<em style="color:#aaa;">primaria</em>'
+                                : 'Link ' + ifc.link_idx + ' ↔ ' + (ifc.peer_vm_name || '?');
+                            var vlanLabel = ifc.vlan_id ? ifc.vlan_id : (ifc.type === 'primary' ? sliceVlan : '—');
+                            rows_html +=
+                                '<tr>' +
+                                '<td style="padding:4px 8px;border-bottom:1px solid #2a3a4a;">' + linkLabel + '</td>' +
+                                '<td style="padding:4px 8px;border-bottom:1px solid #2a3a4a;font-family:monospace;">' + ifc.iface_name + '</td>' +
+                                '<td style="padding:4px 8px;border-bottom:1px solid #2a3a4a;font-family:monospace;font-size:11px;">' + ifc.mac + '</td>' +
+                                '<td style="padding:4px 8px;border-bottom:1px solid #2a3a4a;">' + vlanLabel + '</td>' +
+                                '</tr>';
+                        });
+                        document.getElementById('iface-popup-title').textContent = vm.name + ' — Interfaces';
+                        document.getElementById('iface-popup-body').innerHTML =
+                            '<table style="width:100%;border-collapse:collapse;font-size:12px;">' +
+                            '<thead><tr style="color:#7ec8e3;">' +
+                            '<th style="padding:4px 8px;text-align:left;">Enlace</th>' +
+                            '<th style="padding:4px 8px;text-align:left;">Interfaz</th>' +
+                            '<th style="padding:4px 8px;text-align:left;">MAC</th>' +
+                            '<th style="padding:4px 8px;text-align:left;">VLAN</th>' +
+                            '</tr></thead><tbody>' + rows_html + '</tbody></table>';
+                        document.getElementById('iface-popup').style.display = 'block';
+                    }
                 }
+            } else {
+                document.getElementById('iface-popup').style.display = 'none';
             }
         });
 
         // Hover: show tooltip
         network.on('hoverNode', function(params) {
             var vm = vms[params.node];
-            if (!vm) { tooltip.style.display = 'none'; return; }
+            if (!vm) {
+                if (params.node >= numVms) {
+                    var pos = network.canvasToDOM({ x: params.event.center.x, y: params.event.center.y });
+                    tooltip.innerHTML = '<h4>vm' + (params.node + 1) + '</h4><em style="color:#ff8c42;">Nueva VM (preview)</em>';
+                    tooltip.style.display = 'block';
+                    tooltip.style.left = Math.min(pos.x + 18, container.clientWidth - 220) + 'px';
+                    tooltip.style.top = Math.max(pos.y - 40, 10) + 'px';
+                } else {
+                    tooltip.style.display = 'none';
+                }
+                return;
+            }
             var pos = network.canvasToDOM({ x: params.event.center.x, y: params.event.center.y });
             var hostIp = vm.host_ip || '—';
             var vncPort = vm.vnc_port || '—';
             var vncWsPort = vm.vnc_ws_port || '—';
             var vncToken = vm.vnc_token || '—';
             var mac = vm.mac_address || '—';
+            var ifaceCount = (vm.interfaces || []).filter(function(i) { return i.type === 'link'; }).length;
             tooltip.innerHTML =
                 '<h4>' + vm.name + '</h4>' +
                 '<strong>Status:</strong> <span class="status-' + vm.status + '">' + vm.status + '</span><br>' +
@@ -421,6 +477,7 @@
                 '<strong>vCPUs:</strong> ' + (vm.vcpus||'—') + ' | <strong>RAM:</strong> ' + (vm.ram_mb||'—') + 'MB<br>' +
                 '<strong>MAC:</strong> <code>' + mac + '</code><br>' +
                 '<strong>VNC:</strong> ' + vncPort + ' (WS: ' + vncWsPort + ')<br>' +
+                (ifaceCount > 0 ? '<em style="color:#7ec8e3;">🖱 Click para ver ' + ifaceCount + ' interfaz(ces) de enlace</em>' : '') +
                 '<strong>Token:</strong> <code>' + vncToken + '</code>';
             tooltip.style.display = 'block';
             tooltip.style.left = Math.min(pos.x + 18, container.clientWidth - 220) + 'px';

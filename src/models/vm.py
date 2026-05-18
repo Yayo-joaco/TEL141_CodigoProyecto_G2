@@ -4,7 +4,7 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
 import uuid
 
@@ -35,6 +35,7 @@ class VM:
     vnc_token: Optional[str] = None
     tap_interface: Optional[str] = None
     qemu_pid: Optional[int] = None
+    interfaces: Optional[List[dict]] = None  # [{type, tap_name, mac, vlan_id, link_idx, peer_vm_name, iface_name}]
     status: VMStatus = VMStatus.PENDING
     error_message: Optional[str] = None
     enable_internet: bool = False
@@ -62,6 +63,7 @@ class VM:
             "vnc_token": self.vnc_token,
             "tap_interface": self.tap_interface,
             "qemu_pid": self.qemu_pid,
+            "interfaces": self.interfaces or [],
             "status": self.status.value if isinstance(self.status, VMStatus) else self.status,
             "enable_internet": self.enable_internet,
             "image": self.image,

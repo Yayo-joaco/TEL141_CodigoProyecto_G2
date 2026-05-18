@@ -34,6 +34,24 @@ class SliceManager:
             vms = self._build_vm_objects(slice_obj)
         slice_obj.status = SliceStatus.CREATING
 
+        # Compute per-link VLANs from topology
+        links = Topology.get_links(slice_obj.topology, len(vms))
+        vm_names = [vm.name for vm in vms]
+        link_vlans = []
+        for link_idx, (a, b) in enumerate(links):
+            lv = self.db.assign_vlan_for_link(slice_obj.id, link_idx)
+            if lv:
+                link_vlans.append({
+                    "link_idx": link_idx,
+                    "vlan_id": lv,
+                    "vm_a_name": vm_names[a] if a < len(vm_names) else f"vm{a+1}",
+                    "vm_b_name": vm_names[b] if b < len(vm_names) else f"vm{b+1}",
+                })
+        slice_obj.link_vlans = link_vlans if link_vlans else None
+
+        # Build per-VM link interface list
+        vm_link_map = self._build_vm_link_map(vms, links, link_vlans)
+
         # Deploy all VMs in parallel (R1.11 — paralelismo en despliegue)
         def _deploy(vm: VM):
             placement = self._get_placement_for_vm(vm)
@@ -44,7 +62,8 @@ class SliceManager:
                 img = self.db.get_image_path(vm.image)
                 if img:
                     image_path = img
-            ok = self.driver.create_vm(vm, placement, image_path)
+            ok = self.driver.create_vm(vm, placement, image_path,
+                                       link_interfaces=vm_link_map.get(vm.name, []))
             return vm, ok, vm.error_message if not ok else None
 
         failed_error = None
@@ -74,7 +93,8 @@ class SliceManager:
 
         slice_obj.status = SliceStatus.ACTIVE
         self._persist_slice(slice_obj, vms)
-        logger.info("Slice '%s' created with %d VMs", slice_obj.name, len(vms))
+        logger.info("Slice '%s' created with %d VMs, %d links",
+                    slice_obj.name, len(vms), len(link_vlans))
         return vms
 
     def edit_slice(self, slice_id: str, add_vms: int = 0,
@@ -116,6 +136,41 @@ class SliceManager:
 
         new_vms_list = []
         if add_vms > 0 and pre_placed_vms:
+            # Compute extension links and allocate VLANs for them
+            all_vms_after = active_vms + pre_placed_vms
+            ext_topo_type = TopologyType(ext_topology) if ext_topology else TopologyType.LINEAL
+            anchor_idx = next(
+                (i for i, vm in enumerate(all_vms_after) if vm.name == anchor_vm_hint),
+                len(active_vms) - 1
+            )
+            ext_links_raw = Topology.get_links(ext_topo_type, len(pre_placed_vms) + 1)
+            # Offset indices: anchor is at anchor_idx, new VMs start at len(active_vms)
+            base_link_count = len(slice_obj.link_vlans or [])
+            ext_link_vlans = []
+            for li, (a, b) in enumerate(ext_links_raw):
+                real_a = anchor_idx if a == 0 else len(active_vms) + a - 1
+                real_b = anchor_idx if b == 0 else len(active_vms) + b - 1
+                lv = self.db.assign_vlan_for_link(slice_obj.id, base_link_count + li)
+                if lv:
+                    ext_link_vlans.append({
+                        "link_idx": base_link_count + li,
+                        "vlan_id": lv,
+                        "vm_a_name": all_vms_after[real_a].name if real_a < len(all_vms_after) else "",
+                        "vm_b_name": all_vms_after[real_b].name if real_b < len(all_vms_after) else "",
+                    })
+            # Merge into slice link_vlans
+            existing_lv = slice_obj.link_vlans or []
+            slice_obj.link_vlans = existing_lv + ext_link_vlans
+
+            # Build link map for new VMs only
+            ext_vm_link_map = self._build_vm_link_map(
+                all_vms_after,
+                [(anchor_idx if a == 0 else len(active_vms) + a - 1,
+                  anchor_idx if b == 0 else len(active_vms) + b - 1)
+                 for a, b in ext_links_raw],
+                ext_link_vlans,
+            )
+
             for new_vm in pre_placed_vms:
                 placement = self._get_placement_for_vm(new_vm)
                 if not placement:
@@ -125,7 +180,10 @@ class SliceManager:
                     img = self.db.get_image_path(new_vm.image)
                     if img:
                         image_path = img
-                success = self.driver.create_vm(new_vm, placement, image_path)
+                success = self.driver.create_vm(
+                    new_vm, placement, image_path,
+                    link_interfaces=ext_vm_link_map.get(new_vm.name, [])
+                )
                 if not success:
                     return False, f"Fallo al crear VM {new_vm.name}", None
                 new_vms_list.append(new_vm)
@@ -141,10 +199,12 @@ class SliceManager:
 
         if new_vms_list:
             vlan_id = slice_obj.vlan_id or 300
-            subnet = slice_obj.subnet or "10.60.3.0/24"
             for vm in new_vms_list:
                 if vm.tap_interface and vm.host_ip:
                     self.network._set_vlan(vm.host_ip, vm.tap_interface, vlan_id)
+                for iface in (vm.interfaces or []):
+                    if iface.get("type") == "link" and iface.get("vlan_id") and vm.host_ip:
+                        self.network._set_vlan(vm.host_ip, iface["tap_name"], iface["vlan_id"])
 
         self._persist_slice(slice_obj, all_vms)
         return True, f"Slice editado: {len(all_vms)} VMs total", self.get_slice_info(slice_id)
@@ -212,6 +272,32 @@ class SliceManager:
             )
             vms.append(vm)
         return vms
+
+    def _build_vm_link_map(self, vms: List[VM],
+                           links: List[Tuple[int, int]],
+                           link_vlans: List[dict]) -> dict:
+        """
+        Returns {vm_name: [{link_idx, vlan_id, peer_vm_name}]} for each VM.
+        Each entry represents one link interface the VM needs.
+        """
+        vm_names = [vm.name for vm in vms]
+        vlan_by_link = {lv["link_idx"]: lv["vlan_id"] for lv in link_vlans}
+        result = {vm.name: [] for vm in vms}
+        for link_idx, (a, b) in enumerate(links):
+            if a >= len(vm_names) or b >= len(vm_names):
+                continue
+            vlan_id = vlan_by_link.get(link_idx)
+            result[vm_names[a]].append({
+                "link_idx": link_idx,
+                "vlan_id": vlan_id,
+                "peer_vm_name": vm_names[b],
+            })
+            result[vm_names[b]].append({
+                "link_idx": link_idx,
+                "vlan_id": vlan_id,
+                "peer_vm_name": vm_names[a],
+            })
+        return result
 
     def _get_placement_for_vm(self, vm: VM):
         if not vm.host_ip:

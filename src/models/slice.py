@@ -49,6 +49,7 @@ class Slice:
     ext_topology: Optional[str] = None
     anchor_vm_name: Optional[str] = None
     base_num_vms: Optional[int] = None
+    link_vlans: Optional[List[dict]] = None  # [{link_idx, vlan_id, vm_a_name, vm_b_name}]
 
     def __post_init__(self):
         if not self.id:
@@ -75,4 +76,5 @@ class Slice:
             "ext_topology": self.ext_topology,
             "anchor_vm_name": self.anchor_vm_name,
             "base_num_vms": self.base_num_vms,
+            "link_vlans": self.link_vlans or [],
         }

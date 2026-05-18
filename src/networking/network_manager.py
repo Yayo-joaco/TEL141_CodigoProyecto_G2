@@ -65,10 +65,11 @@ class NetworkManager:
         """
         Full network setup for a slice:
         1. Ensure OVS bridge + trunk uplink on all involved hosts
-        2. Tag each VM tap port with the slice VLAN
-        3. DHCP namespace on headnode (if requested)
-        4. NAT + ip_forward on headnode (if requested)
-        5. SSH port forwarding on headnode for VMs with enable_internet=True
+        2. Tag each VM primary tap with the slice VLAN
+        3. Tag each VM link tap with its per-link VLAN
+        4. DHCP namespace on headnode (if requested)
+        5. NAT + ip_forward on headnode (if requested)
+        6. SSH port forwarding on headnode for VMs with enable_internet=True
         """
         hosts_involved = list(set(vm.host_ip for vm in vms if vm.host_ip))
 
@@ -78,27 +79,33 @@ class NetworkManager:
         try:
             for host_ip in hosts_involved:
                 self._ensure_bridge(host_ip)
+            # Headnode also needs br-int for the DHCP gateway interface
+            self._ensure_bridge(self.headnode_ip)
 
             for vm in vms:
                 if vm.tap_interface and vm.host_ip:
+                    # Primary tap → slice VLAN (internet/management)
                     self._set_vlan(vm.host_ip, vm.tap_interface, vlan_id)
+                # Link taps → per-link VLAN
+                for iface in (vm.interfaces or []):
+                    if iface.get("type") == "link" and iface.get("vlan_id") and vm.host_ip:
+                        self._set_vlan(vm.host_ip, iface["tap_name"], iface["vlan_id"])
+
+            # Assign predictable IPs before DHCP so leases and SSH rules match
+            subnet_base = subnet.split("/")[0].rsplit(".", 1)[0]
+            for vm in vms:
+                if not vm.ip_address:
+                    vm.ip_address = f"{subnet_base}.{vm.index + 2}"
 
             if enable_dhcp:
-                self._setup_dhcp(self.headnode_ip, vlan_id, subnet)
+                self._setup_dhcp(self.headnode_ip, vlan_id, subnet, vms)
 
             if enable_internet:
                 self._setup_internet(self.headnode_ip, vlan_id, subnet)
 
-            # SSH port forwarding for individual VMs that need external access.
-            # IPs are assigned statically from the subnet: .2 for vm index 0, .3 for index 1, etc.
-            # (subnet base + 1 is the gateway, so VMs start at base + 2)
-            subnet_base = subnet.split("/")[0].rsplit(".", 1)[0]  # e.g. "10.60.3"
             for vm in vms:
                 if not vm.enable_internet or not vm.vnc_port:
                     continue
-                # Assign static IP if not already set
-                if not vm.ip_address:
-                    vm.ip_address = f"{subnet_base}.{vm.index + 2}"
                 fwd_port = SSH_FWD_BASE + vm.vnc_port
                 self._setup_ssh_forward(self.headnode_ip, fwd_port, vm.ip_address, vm)
 
@@ -176,51 +183,81 @@ class NetworkManager:
                    f"sudo ovs-vsctl set port {tap_name} tag={vlan_id} 2>/dev/null")
         client.close()
 
-    def _setup_dhcp(self, host_ip: str, vlan_id: int, subnet: str):
-        """Run dnsmasq inside a network namespace attached to br-int via OVS internal port."""
+    def _setup_dhcp(self, host_ip: str, vlan_id: int, subnet: str,
+                    vms: List[VM] = None):
+        """
+        Run dnsmasq in the main namespace via an OVS internal port tagged with
+        the slice VLAN.  Running in the main namespace (not a netns) lets the
+        kernel forward VM traffic through ip_forward + MASQUERADE so VMs can
+        reach the Internet.  Static --dhcp-host entries pin each VM to a
+        predictable IP so SSH DNAT rules always match.
+        """
         client = self._connect(host_ip)
-        ns = f"dnsmasq-vlan{vlan_id}"
         iface = f"dhcp-vlan{vlan_id}"
-        parts = subnet.split(".")
-        gw_ip = f"{parts[0]}.{parts[1]}.{parts[2]}.1"
-        range_start = f"{parts[0]}.{parts[1]}.{parts[2]}.100"
-        range_end = f"{parts[0]}.{parts[1]}.{parts[2]}.200"
+        parts = subnet.split("/")[0].split(".")
+        subnet_base = f"{parts[0]}.{parts[1]}.{parts[2]}"
+        gw_ip = f"{subnet_base}.1"
+        # /28 gives .0-.15; gateway=.1, VMs=.2-.14
+        range_start = f"{subnet_base}.2"
+        range_end = f"{subnet_base}.14"
 
-        self._exec(client, f"sudo ip netns add {ns} 2>/dev/null")
         self._exec(client,
                    f"sudo ovs-vsctl --may-exist add-port {self.OVS_BRIDGE} {iface} "
                    f"-- set interface {iface} type=internal 2>/dev/null")
         self._exec(client,
                    f"sudo ovs-vsctl set port {iface} tag={vlan_id} 2>/dev/null")
+        self._exec(client, f"sudo ip link set {iface} up 2>/dev/null")
         self._exec(client,
-                   f"sudo ip link set {iface} netns {ns} 2>/dev/null")
+                   f"sudo ip addr add {gw_ip}/24 dev {iface} 2>/dev/null")
         self._exec(client,
-                   f"sudo ip netns exec {ns} ip link set {iface} up")
+                   f"sudo pkill -f 'dnsmasq.*{iface}' 2>/dev/null; true")
+
+        # Static leases: pin each VM to subnet_base.{index+2} via its primary MAC
+        dhcp_host_args = ""
+        if vms:
+            for vm in vms:
+                mac = vm.mac_address
+                if not mac:
+                    continue
+                vm_ip = f"{subnet_base}.{vm.index + 2}"
+                dhcp_host_args += f"--dhcp-host={mac},{vm_ip} "
+
         self._exec(client,
-                   f"sudo ip netns exec {ns} ip addr add {gw_ip}/24 dev {iface} 2>/dev/null")
-        self._exec(client,
-                   f"sudo pkill -f 'dnsmasq.*{ns}' 2>/dev/null; true")
-        self._exec(client,
-                   f"sudo ip netns exec {ns} dnsmasq "
+                   f"sudo dnsmasq "
                    f"--interface={iface} "
                    f"--dhcp-range={range_start},{range_end},255.255.255.0,12h "
+                   f"--dhcp-option=3,{gw_ip} "
+                   f"--dhcp-option=6,8.8.8.8 "
+                   f"{dhcp_host_args}"
                    f"--no-resolv --server=8.8.8.8 "
-                   f"--pid-file=/tmp/dnsmasq-{ns}.pid")
-        logger.info("DHCP configured for VLAN %d on %s", vlan_id, host_ip)
+                   f"--pid-file=/tmp/dnsmasq-{iface}.pid")
+        logger.info("DHCP configured for VLAN %d on %s (gateway %s)",
+                    vlan_id, host_ip, gw_ip)
         client.close()
 
     def _setup_internet(self, host_ip: str, vlan_id: int, subnet: str):
         """Enable NAT (MASQUERADE) so VMs can reach the Internet."""
         client = self._connect(host_ip)
         self._exec(client, "sudo sysctl -w net.ipv4.ip_forward=1 2>/dev/null")
-        # Use -C to check before adding to avoid duplicate rules
-        check = self._exec(client,
-                           f"sudo iptables -t nat -C POSTROUTING "
-                           f"-s {subnet} -o {self.nat_iface} -j MASQUERADE 2>&1")
-        if "No chain" in check or "no chain" in check or check.strip() == "":
-            self._exec(client,
-                       f"sudo iptables -t nat -A POSTROUTING "
-                       f"-s {subnet} -o {self.nat_iface} -j MASQUERADE")
+        # Persist ip_forward across reboots
+        self._exec(client,
+                   "grep -q 'net.ipv4.ip_forward=1' /etc/sysctl.conf || "
+                   "echo 'net.ipv4.ip_forward=1' | sudo tee -a /etc/sysctl.conf")
+        # MASQUERADE: VMs → internet via headnode's external NIC
+        self._exec(client,
+                   f"sudo iptables -t nat -C POSTROUTING "
+                   f"-s {subnet} -o {self.nat_iface} -j MASQUERADE 2>/dev/null || "
+                   f"sudo iptables -t nat -A POSTROUTING "
+                   f"-s {subnet} -o {self.nat_iface} -j MASQUERADE")
+        # FORWARD rules: allow VM traffic out and established traffic back
+        self._exec(client,
+                   f"sudo iptables -C FORWARD -s {subnet} -j ACCEPT 2>/dev/null || "
+                   f"sudo iptables -A FORWARD -s {subnet} -j ACCEPT")
+        self._exec(client,
+                   f"sudo iptables -C FORWARD -d {subnet} "
+                   f"-m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || "
+                   f"sudo iptables -A FORWARD -d {subnet} "
+                   f"-m state --state RELATED,ESTABLISHED -j ACCEPT")
         logger.info("NAT enabled for VLAN %d subnet %s on %s",
                     vlan_id, subnet, host_ip)
         client.close()
@@ -260,8 +297,13 @@ class NetworkManager:
 
     def _cleanup_dhcp(self, host_ip: str, vlan_id: int):
         client = self._connect(host_ip)
+        iface = f"dhcp-vlan{vlan_id}"
+        self._exec(client, f"sudo pkill -f 'dnsmasq.*{iface}' 2>/dev/null; true")
+        self._exec(client,
+                   f"sudo ovs-vsctl del-port {self.OVS_BRIDGE} {iface} 2>/dev/null; true")
+        self._exec(client, f"sudo ip link delete {iface} 2>/dev/null; true")
+        # Also clean up old-style namespace if it exists from a previous version
         ns = f"dnsmasq-vlan{vlan_id}"
-        self._exec(client, f"sudo pkill -f 'dnsmasq.*{ns}' 2>/dev/null; true")
         self._exec(client, f"sudo ip netns delete {ns} 2>/dev/null; true")
         client.close()
 
