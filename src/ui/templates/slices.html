@@ -84,7 +84,7 @@
         <div class="card" style="margin-top:1.5rem;">
             <div class="card-heading">
                 <div>
-                    <h2>Gestión de Hosts (R1.3)</h2>
+                    <h2>Gestión de Hosts</h2>
                     <p>Agrega o remueve workers del cluster sin reiniciar el sistema.</p>
                 </div>
                 <a href="/refresh-hosts" class="btn btn-primary">Actualizar recursos</a>
@@ -96,7 +96,7 @@
                         <th>Hostname</th>
                         <th>IP</th>
                         <th>Rol</th>
-                        <th>vCPUs</th>
+                        <th>CPU</th>
                         <th>RAM</th>
                         <th>Disco</th>
                         <th>VMs activas</th>
@@ -109,9 +109,21 @@
                         <td><strong>{{ h.hostname }}</strong></td>
                         <td>{{ h.ip }}</td>
                         <td>{{ h.role }}</td>
-                        <td>{{ h.available_vcpus }}/{{ h.total_vcpus }}</td>
-                        <td>{{ h.available_ram_mb }}/{{ h.total_ram_mb }} MB</td>
-                        <td>{{ h.available_disk_gb }}/{{ h.total_disk_gb }} GB</td>
+                        <td>
+                            {% set cpu_used = h.total_vcpus - h.available_vcpus %}
+                            {% set cpu_pct = (cpu_used / h.total_vcpus * 100) if h.total_vcpus > 0 else 0 %}
+                            {{ cpu_used }}/{{ h.total_vcpus }} ({{ '%0.0f' % cpu_pct }}%)
+                        </td>
+                        <td>
+                            {% set ram_used = h.total_ram_mb - h.available_ram_mb %}
+                            {% set ram_pct = (ram_used / h.total_ram_mb * 100) if h.total_ram_mb > 0 else 0 %}
+                            {{ ram_used }}/{{ h.total_ram_mb }} MB ({{ '%0.1f' % ram_pct }}%)
+                        </td>
+                        <td>
+                            {% set disk_used = h.total_disk_gb - h.available_disk_gb %}
+                            {% set disk_pct = (disk_used / h.total_disk_gb * 100) if h.total_disk_gb > 0 else 0 %}
+                            {{ disk_used }}/{{ h.total_disk_gb }} GB ({{ '%0.1f' % disk_pct }}%)
+                        </td>
                         <td>{{ h.vms_running }}</td>
                         <td>
                             {% if h.role != 'headnode' %}

@@ -599,6 +599,12 @@ def task_status_page(ticket_id):
                            redirect_url=redirect_url,
                            user_role=session.get("role", ""),
                            username=session.get("username", ""))
+
+
+@app.route("/admin/sessions")
+@admin_required
+def admin_sessions():
+    orch = get_orchestrator()
     username = session.get("username", "")
     user_obj = orch.db.get_user_by_username(username)
     active = orch.get_active_sessions(user_obj) if user_obj else []
