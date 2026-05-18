@@ -142,7 +142,8 @@ class LinuxDriver(BaseDriver):
                            f"--run-command 'mkdir -p /etc/cloud/cloud.cfg.d' "
                            f"--upload /tmp/{vm_name}-ci-disable.yaml:"
                            f"/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg "
-                           f"--quiet 2>/dev/null || true")
+                           f"--quiet 2>/dev/null || true",
+                           timeout=120)
 
             qemu_cmd = (
                 f"sudo qemu-system-x86_64 "
@@ -423,8 +424,9 @@ class LinuxDriver(BaseDriver):
         )
         return client
 
-    def _exec(self, client: paramiko.SSHClient, cmd: str) -> str:
-        _, stdout, stderr = client.exec_command(cmd, timeout=30)
+    def _exec(self, client: paramiko.SSHClient, cmd: str,
+              timeout: int = 30) -> str:
+        _, stdout, stderr = client.exec_command(cmd, timeout=timeout)
         out = stdout.read().decode("utf-8", errors="replace")
         err = stderr.read().decode("utf-8", errors="replace")
         if err and "Warning" not in err:
