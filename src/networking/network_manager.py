@@ -31,9 +31,11 @@ class NetworkManager:
     Configures layer-2 network connectivity for slices using OVS.
 
     Cross-host L2 connectivity is achieved by adding the physical uplink
-    (uplink_iface) as a trunk port on br-int on every worker. VLAN-tagged
-    frames travel over the physical switch between workers, so VMs on
-    different hosts in the same VLAN see each other at L2 without tunnels.
+    (trunk_port, default eth1) as a trunk port on br-int on every worker.
+    VLAN-tagged frames travel over the physical switch between workers, so
+    VMs on different hosts in the same VLAN see each other at L2 without
+    tunnels. NAT/MASQUERADE uses a separate interface (nat_iface, default
+    eth0) which is the management NIC — keeping it out of OVS.
 
     Requirements covered:
       R5.1 - Internet access (NAT/MASQUERADE)
@@ -47,12 +49,14 @@ class NetworkManager:
 
     def __init__(self, ssh_key_path: str = "/home/ubuntu/.ssh/id_rsa",
                  headnode_ip: str = "10.0.10.1",
-                 uplink_iface: str = "eth0"):
+                 trunk_port: str = "eth1",
+                 nat_iface: str = "eth0"):
         self.ssh_key_path = ssh_key_path
         self.headnode_ip = headnode_ip
-        # Physical NIC added as trunk port to br-int on every host so
-        # VLAN-tagged traffic crosses the physical switch between workers.
-        self.uplink_iface = uplink_iface
+        # eth1: added as OVS trunk so VLAN frames cross the physical switch.
+        self.trunk_port = trunk_port
+        # eth0: management NIC used only for NAT/MASQUERADE — never added to OVS.
+        self.nat_iface = nat_iface
 
     def setup_slice_network(self, slice_obj: Slice, vms: List[VM],
                             vlan_id: int, subnet: str,
@@ -85,13 +89,18 @@ class NetworkManager:
             if enable_internet:
                 self._setup_internet(self.headnode_ip, vlan_id, subnet)
 
-            # SSH port forwarding for individual VMs that need external access
-            internet_vms = [vm for vm in vms if vm.enable_internet and vm.ip_address]
-            for vm in internet_vms:
-                fwd_port = SSH_FWD_BASE + vm.vnc_port if vm.vnc_port else None
-                if fwd_port:
-                    self._setup_ssh_forward(self.headnode_ip, fwd_port,
-                                            vm.ip_address, vm)
+            # SSH port forwarding for individual VMs that need external access.
+            # IPs are assigned statically from the subnet: .2 for vm index 0, .3 for index 1, etc.
+            # (subnet base + 1 is the gateway, so VMs start at base + 2)
+            subnet_base = subnet.split("/")[0].rsplit(".", 1)[0]  # e.g. "10.60.3"
+            for vm in vms:
+                if not vm.enable_internet or not vm.vnc_port:
+                    continue
+                # Assign static IP if not already set
+                if not vm.ip_address:
+                    vm.ip_address = f"{subnet_base}.{vm.index + 2}"
+                fwd_port = SSH_FWD_BASE + vm.vnc_port
+                self._setup_ssh_forward(self.headnode_ip, fwd_port, vm.ip_address, vm)
 
             time.sleep(1)
             logger.info("Network configured for slice %s", slice_obj.name)
@@ -133,7 +142,7 @@ class NetworkManager:
         workers, so cross-host links work without tunnels (R5.3).
         """
         logger.info("Topology links active via VLAN %d trunk on %s",
-                    vlan_id, self.uplink_iface)
+                    vlan_id, self.trunk_port)
         return True
 
     # ------------------------------------------------------------------
@@ -155,12 +164,10 @@ class NetworkManager:
         # Idempotent: ovs-vsctl ignores the port if it already exists.
         self._exec(client,
                    f"sudo ovs-vsctl --may-exist add-port {self.OVS_BRIDGE} "
-                   f"{self.uplink_iface}")
+                   f"{self.trunk_port}")
         # Trunk mode = no tag set on the port (default OVS behaviour).
-        # Preserve the host IP that was on the physical NIC by moving it to
-        # the bridge (needed so the headnode/worker stays reachable via SSH).
         self._exec(client,
-                   f"sudo ip link set {self.uplink_iface} up 2>/dev/null")
+                   f"sudo ip link set {self.trunk_port} up 2>/dev/null")
         client.close()
 
     def _set_vlan(self, host_ip: str, tap_name: str, vlan_id: int):
@@ -209,11 +216,11 @@ class NetworkManager:
         # Use -C to check before adding to avoid duplicate rules
         check = self._exec(client,
                            f"sudo iptables -t nat -C POSTROUTING "
-                           f"-s {subnet} -o {self.uplink_iface} -j MASQUERADE 2>&1")
+                           f"-s {subnet} -o {self.nat_iface} -j MASQUERADE 2>&1")
         if "No chain" in check or "no chain" in check or check.strip() == "":
             self._exec(client,
                        f"sudo iptables -t nat -A POSTROUTING "
-                       f"-s {subnet} -o {self.uplink_iface} -j MASQUERADE")
+                       f"-s {subnet} -o {self.nat_iface} -j MASQUERADE")
         logger.info("NAT enabled for VLAN %d subnet %s on %s",
                     vlan_id, subnet, host_ip)
         client.close()

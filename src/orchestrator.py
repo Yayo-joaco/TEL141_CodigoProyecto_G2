@@ -140,12 +140,17 @@ class Orchestrator:
     def edit_slice(self, slice_id: str, add_vms: int = 0,
                    remove_vm_ids: List[str] = None,
                    new_vcpus: int = None, new_ram_mb: int = None,
-                   new_disk_gb: int = None, user: User = None) -> dict:
+                   new_disk_gb: int = None, user: User = None,
+                   new_vms_image: dict = None,
+                   new_vms_internet: List[int] = None) -> dict:
         vms = self.db.get_vms_for_slice(slice_id)
         if remove_vm_ids:
             for vm in vms:
                 if vm.id in (remove_vm_ids or []):
                     self.placement_engine.release_vm(vm)
+
+        new_vms_image = new_vms_image or {}
+        new_vms_internet = new_vms_internet or []
 
         extra_vms = []
         if add_vms > 0:
@@ -153,12 +158,15 @@ class Orchestrator:
             if slice_obj:
                 current_count = len([v for v in vms if v.status != VMStatus.DELETED])
                 for i in range(add_vms):
+                    vm_num = current_count + i + 1
                     new_vm = VM(id="", slice_id=slice_id,
-                                name=f"vm{current_count + i + 1}",
+                                name=f"vm{vm_num}",
                                 index=current_count + i,
                                 vcpus=new_vcpus or slice_obj.vcpus_per_vm,
                                 ram_mb=new_ram_mb or slice_obj.ram_mb_per_vm,
-                                disk_gb=new_disk_gb or slice_obj.disk_gb_per_vm)
+                                disk_gb=new_disk_gb or slice_obj.disk_gb_per_vm,
+                                image=new_vms_image.get(str(vm_num)),
+                                enable_internet=(vm_num in new_vms_internet))
                     extra_vms.append(new_vm)
                 plan = self.placement_engine.place_vms(slice_id, extra_vms)
                 if not plan.success:
@@ -374,12 +382,15 @@ class Orchestrator:
     def edit_slice_async(self, slice_id: str, add_vms: int = 0,
                          remove_vm_ids: List[str] = None,
                          new_vcpus: int = None, new_ram_mb: int = None,
-                         new_disk_gb: int = None, user: User = None) -> str:
+                         new_disk_gb: int = None, user: User = None,
+                         new_vms_image: dict = None,
+                         new_vms_internet: List[int] = None) -> str:
         return self.task_queue.enqueue(
             f"edit_slice:{slice_id}",
             self.edit_slice,
             slice_id, add_vms, remove_vm_ids,
             new_vcpus, new_ram_mb, new_disk_gb, user,
+            new_vms_image, new_vms_internet,
         )
 
     def get_task_status(self, ticket_id: str) -> Optional[dict]:

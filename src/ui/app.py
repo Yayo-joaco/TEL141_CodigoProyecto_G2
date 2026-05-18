@@ -81,20 +81,24 @@ def get_orchestrator():
             db.save_host(host)
         ssh_key = hosts_cfg["ssh"].get("key_path", "/home/ubuntu/.ssh/id_rsa")
         driver = LinuxDriver(ssh_key_path=ssh_key)
+        trunk_port = net_cfg.get("ovs", {}).get("trunk_port", "eth1")
+        nat_iface = net_cfg.get("internet", {}).get("nat_interface", "eth0")
         network = NetworkManager(ssh_key_path=ssh_key,
-                                 headnode_ip=headnode["ip"])
+                                 headnode_ip=headnode["ip"],
+                                 trunk_port=trunk_port,
+                                 nat_iface=nat_iface)
         base_image = hosts_cfg["base_image"]["path"]
         _orchestrator = Orchestrator(hosts=hosts, driver=driver,
                                      network=network, db=db,
                                      base_image=base_image)
         # Asegurar que la imagen de Ubuntu esté registrada
         img_list = db.list_images()
-        ubuntu_exists = any(i.name == "ubuntu" for i in img_list)
+        ubuntu_exists = any(i["name"] == "ubuntu" for i in img_list)
         if not ubuntu_exists:
             db.save_image("ubuntu", "ubuntu-server.qcow2",
                          "/home/ubuntu/ubuntu-server.qcow2",
                          "qcow2", 3, "admin")
-        cirros_exists = any(i.name == "cirros" for i in img_list)
+        cirros_exists = any(i["name"] == "cirros" for i in img_list)
         if not cirros_exists:
             db.save_image("cirros", "cirros-base.img",
                          base_image,
@@ -302,11 +306,22 @@ def edit_slice(slice_id):
         new_ram_mb = int(new_ram_mb) if new_ram_mb and new_ram_mb.strip() else None
         new_disk_gb = int(new_disk_gb) if new_disk_gb and new_disk_gb.strip() else None
 
+        new_vms_image = {}
+        for key in request.form:
+            if key.startswith("vm_image_"):
+                vm_num = key.replace("vm_image_", "")
+                new_vms_image[vm_num] = request.form[key]
+
+        new_vms_internet_str = request.form.get("new_vms_internet", "")
+        new_vms_internet = [int(x.strip()) for x in new_vms_internet_str.split(",") if x.strip().isdigit()]
+
         result = orch.edit_slice_async(
             slice_id=slice_id, add_vms=add_vms,
             remove_vm_ids=remove_vm_ids if remove_vm_ids else None,
             new_vcpus=new_vcpus, new_ram_mb=new_ram_mb,
             new_disk_gb=new_disk_gb, user=user_obj,
+            new_vms_image=new_vms_image if new_vms_image else None,
+            new_vms_internet=new_vms_internet if new_vms_internet else None,
         )
         return redirect(url_for("task_status_page", ticket_id=result,
                                 next=url_for("view_slice", slice_id=slice_id)))
