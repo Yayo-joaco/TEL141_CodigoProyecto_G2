@@ -147,10 +147,7 @@ class LinuxDriver(BaseDriver):
                            f"cloud-localds {seed_iso} "
                            f"/tmp/{vm_name}-user-data /tmp/{vm_name}-meta-data "
                            f"2>/dev/null; true")
-                seed_drive = (
-                    f"-drive file={seed_iso},"
-                    f"if=virtio,format=raw,readonly=on "
-                )
+                seed_drive = f"-cdrom {seed_iso} "
 
             qemu_cmd = (
                 f"sudo qemu-system-x86_64 "
