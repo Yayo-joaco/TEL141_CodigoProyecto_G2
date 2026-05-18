@@ -18,8 +18,8 @@ network:
 
 ovs:
   bridge_name: "br-int"
-  trunk_port: "eth1"
+  trunk_port: "ens4"
 
 internet:
   enabled: false
-  nat_interface: "eth0"
+  nat_interface: "ens3"
