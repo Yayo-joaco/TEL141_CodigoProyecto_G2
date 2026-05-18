@@ -61,6 +61,7 @@ class VM:
             "vnc_ws_port": self.vnc_ws_port,
             "vnc_token": self.vnc_token,
             "tap_interface": self.tap_interface,
+            "qemu_pid": self.qemu_pid,
             "status": self.status.value if isinstance(self.status, VMStatus) else self.status,
             "enable_internet": self.enable_internet,
             "image": self.image,
