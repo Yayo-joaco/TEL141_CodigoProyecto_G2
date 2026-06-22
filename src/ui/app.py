@@ -1265,7 +1265,11 @@ def api_task_status_json(ticket_id):
 
 import os as _os
 
-_UI_DIST = _os.path.join(_os.path.dirname(__file__), "..", "..", "Nueva UI", "dist")
+_UI_DIST_CANDIDATES = [
+    _os.path.join(_os.path.dirname(__file__), "..", "..", "Nueva UI", "dist", "client"),
+    _os.path.join(_os.path.dirname(__file__), "..", "..", "Nueva UI", "dist"),
+]
+_UI_DIST = next((p for p in _UI_DIST_CANDIDATES if _os.path.exists(_os.path.join(p, "index.html"))), _UI_DIST_CANDIDATES[0])
 
 
 @app.route("/assets/<path:filename>")

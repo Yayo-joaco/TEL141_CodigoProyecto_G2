@@ -15,11 +15,12 @@ VENV="$PROJECT_DIR/venv"
 echo "=== PUCP Cloud Orchestrator — Deploy ==="
 echo "Project: $PROJECT_DIR"
 
-# 1. Pull latest
+# 1. Pull latest (backend + submodules)
 echo ""
-echo "[1/4] git pull..."
+echo "[1/4] git pull + submodule update..."
 cd "$PROJECT_DIR"
 git pull
+git submodule update --init --remote "Nueva UI" 2>/dev/null || git submodule update --init --recursive
 
 # 2. Python venv + dependencies
 echo ""
