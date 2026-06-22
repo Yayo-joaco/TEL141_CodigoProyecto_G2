@@ -169,6 +169,10 @@ def operator_or_admin_required(f):
 
 @app.route("/login", methods=["GET", "POST"])
 def login_page():
+    # If Nueva UI dist is built, let the SPA handle login
+    index = _os.path.join(_UI_DIST, "index.html")
+    if request.method == "GET" and _os.path.exists(index):
+        return send_file(index)
     if request.method == "POST":
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "").strip()
@@ -1274,12 +1278,12 @@ def ui_assets(filename):
 def spa_fallback(path):
     # API and WebSocket routes are already handled above — skip them here
     if path.startswith("api/") or path.startswith("ws-proxy/"):
-        from flask import abort
         abort(404)
+    # Always serve React SPA if dist is built
     index = _os.path.join(_UI_DIST, "index.html")
     if _os.path.exists(index):
         return send_file(index)
-    # Fallback to old Flask templates if dist not built yet
+    # Fallback to old Flask templates
     if "user_id" not in session:
         return redirect(url_for("login_page"))
     return redirect(url_for("index"))
