@@ -25,6 +25,48 @@ Base = declarative_base()
 # SQLAlchemy ORM Models
 # =============================================================
 
+class FlavorRecord(Base):
+    __tablename__ = "flavors"
+    id = Column(String(64), primary_key=True)
+    name = Column(String(100), unique=True, nullable=False)
+    vcpus = Column(Integer, default=1)
+    ram_gb = Column(Integer, default=1)
+    disk_gb = Column(Integer, default=10)
+    description = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "vcpus": self.vcpus,
+            "ramGb": self.ram_gb,
+            "diskGb": self.disk_gb,
+            "description": self.description or "",
+        }
+
+
+class ZoneRecord(Base):
+    __tablename__ = "zones"
+    id = Column(String(64), primary_key=True)
+    name = Column(String(100), unique=True, nullable=False)
+    cluster = Column(String(20), nullable=False)   # "linux" | "openstack"
+    servers_count = Column(Integer, default=0)
+    cpu_total = Column(Integer, default=0)
+    ram_total_gb = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "cluster": self.cluster,
+            "servers": self.servers_count,
+            "cpuTotal": self.cpu_total,
+            "ramTotal": self.ram_total_gb,
+        }
+
+
 class UserRecord(Base):
     __tablename__ = "users"
     id = Column(String(64), primary_key=True)
@@ -32,6 +74,7 @@ class UserRecord(Base):
     password_hash = Column(String(255), nullable=False)
     role = Column(String(50), default="user")
     email = Column(String(255), nullable=True)
+    cluster_assignment = Column(String(20), default="linux")  # linux|openstack|both
     is_active = Column(Integer, default=1)
     max_vcpus = Column(Integer, default=16)
     max_ram_mb = Column(Integer, default=16384)
@@ -45,6 +88,7 @@ class UserRecord(Base):
             password_hash=self.password_hash,
             role=Role(self.role) if self.role else Role.USER,
             email=self.email,
+            cluster_assignment=self.cluster_assignment or "linux",
             is_active=bool(self.is_active),
             max_vcpus=self.max_vcpus,
             max_ram_mb=self.max_ram_mb,
@@ -121,6 +165,12 @@ class SliceRecord(Base):
     anchor_vm_name = Column(String(255), nullable=True)
     base_num_vms = Column(Integer, nullable=True)
     link_vlans_json = Column(Text, nullable=True)
+    # Phase 2 columns
+    infrastructure_target = Column(String(20), default="linux")  # linux|openstack|auto
+    zone_id = Column(String(64), nullable=True)
+    flavor_id = Column(String(64), nullable=True)
+    openstack_project_id = Column(String(64), nullable=True)
+    openstack_network_ids_json = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
 
@@ -146,6 +196,11 @@ class SliceRecord(Base):
             anchor_vm_name=getattr(self, 'anchor_vm_name', None),
             base_num_vms=getattr(self, 'base_num_vms', None),
             link_vlans=json.loads(self.link_vlans_json) if getattr(self, 'link_vlans_json', None) else None,
+            infrastructure_target=getattr(self, 'infrastructure_target', 'linux') or 'linux',
+            zone_id=getattr(self, 'zone_id', None),
+            flavor_id=getattr(self, 'flavor_id', None),
+            openstack_project_id=getattr(self, 'openstack_project_id', None),
+            openstack_network_ids=json.loads(self.openstack_network_ids_json) if getattr(self, 'openstack_network_ids_json', None) else None,
         )
 
 
@@ -170,6 +225,10 @@ class VMRecord(Base):
     enable_internet = Column(Integer, default=0)
     image = Column(String(255), nullable=True)
     error_message = Column(Text, nullable=True)
+    # Phase 2 columns
+    flavor_id = Column(String(64), nullable=True)
+    openstack_server_id = Column(String(64), nullable=True)
+    ip_address_external = Column(String(50), nullable=True)  # external/floating IP
     created_at = Column(DateTime, default=datetime.utcnow)
 
     def to_vm(self) -> VM:
@@ -194,6 +253,9 @@ class VMRecord(Base):
             enable_internet=bool(self.enable_internet),
             image=self.image,
             error_message=self.error_message,
+            flavor_id=getattr(self, 'flavor_id', None),
+            openstack_server_id=getattr(self, 'openstack_server_id', None),
+            ip_address_external=getattr(self, 'ip_address_external', None),
             created_at=self.created_at.isoformat() if self.created_at else "",
         )
 
@@ -267,25 +329,32 @@ class DatabaseManager:
         Base.metadata.create_all(self.engine)
         self._migrate_columns()
         self._populate_vlan_pool()
+        self._seed_flavors_and_zones()
         logger.info("Database tables verified/created")
 
     def _migrate_columns(self):
         """Add new columns to existing tables if they don't exist yet."""
+        from sqlalchemy import text
         migrations = [
             ("slices", "ext_topology", "VARCHAR(50)"),
             ("slices", "anchor_vm_name", "VARCHAR(255)"),
             ("slices", "base_num_vms", "INT"),
             ("slices", "link_vlans_json", "TEXT"),
+            ("slices", "infrastructure_target", "VARCHAR(20) DEFAULT 'linux'"),
+            ("slices", "zone_id", "VARCHAR(64)"),
+            ("slices", "flavor_id", "VARCHAR(64)"),
+            ("slices", "openstack_project_id", "VARCHAR(64)"),
+            ("slices", "openstack_network_ids_json", "TEXT"),
             ("vms", "interfaces_json", "TEXT"),
+            ("vms", "flavor_id", "VARCHAR(64)"),
+            ("vms", "openstack_server_id", "VARCHAR(64)"),
+            ("vms", "ip_address_external", "VARCHAR(50)"),
+            ("users", "cluster_assignment", "VARCHAR(20) DEFAULT 'linux'"),
         ]
         with self.engine.connect() as conn:
             for table, col, col_type in migrations:
                 try:
-                    conn.execute(
-                        __import__('sqlalchemy').text(
-                            f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"
-                        )
-                    )
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"))
                     logger.info("Migrated: added column %s.%s", table, col)
                 except Exception:
                     pass  # column already exists
@@ -401,6 +470,11 @@ class DatabaseManager:
                 anchor_vm_name=slice_obj.anchor_vm_name,
                 base_num_vms=slice_obj.base_num_vms,
                 link_vlans_json=json.dumps(slice_obj.link_vlans) if slice_obj.link_vlans else None,
+                infrastructure_target=getattr(slice_obj, 'infrastructure_target', 'linux'),
+                zone_id=getattr(slice_obj, 'zone_id', None),
+                flavor_id=getattr(slice_obj, 'flavor_id', None),
+                openstack_project_id=getattr(slice_obj, 'openstack_project_id', None),
+                openstack_network_ids_json=json.dumps(slice_obj.openstack_network_ids) if getattr(slice_obj, 'openstack_network_ids', None) else None,
             )
             session.merge(record)
             session.commit()
@@ -490,6 +564,9 @@ class DatabaseManager:
                 enable_internet=int(vm.enable_internet),
                 image=vm.image,
                 error_message=vm.error_message,
+                flavor_id=getattr(vm, 'flavor_id', None),
+                openstack_server_id=getattr(vm, 'openstack_server_id', None),
+                ip_address_external=getattr(vm, 'ip_address_external', None),
             )
             session.merge(record)
             session.commit()
@@ -826,6 +903,129 @@ class DatabaseManager:
         except Exception as e:
             session.rollback()
             return None
+        finally:
+            session.close()
+
+    def _seed_flavors_and_zones(self):
+        """Populate flavors and zones tables on first run."""
+        import uuid
+        session = self.Session()
+        try:
+            if session.query(FlavorRecord).count() == 0:
+                defaults = [
+                    ("tiny",   1,  1,  10, "Lightweight VM for tests and tiny services."),
+                    ("small",  2,  4,  20, "Balanced default for most lab slices."),
+                    ("medium", 4,  8,  50, "Good for multi-VM classroom workloads."),
+                    ("large",  8, 16, 100, "For heavier services and larger topologies."),
+                    ("xlarge",16, 32, 200, "High-capacity flavor for demanding clusters."),
+                ]
+                for name, vcpus, ram_gb, disk_gb, desc in defaults:
+                    session.add(FlavorRecord(
+                        id=name, name=name, vcpus=vcpus,
+                        ram_gb=ram_gb, disk_gb=disk_gb, description=desc,
+                    ))
+                logger.info("Seeded default flavors")
+
+            if session.query(ZoneRecord).count() == 0:
+                zones = [
+                    ("AZ-Compute-1",   "linux",      4, 24,  96),
+                    ("AZ-Compute-2",   "linux",      3, 18,  72),
+                    ("AZ-HPC",         "linux",      2, 32, 256),
+                    ("AZ-OpenStack-1", "openstack",  3, 24,  96),
+                    ("AZ-OpenStack-2", "openstack",  3, 24,  96),
+                ]
+                for zid, cluster, servers, cpu, ram in zones:
+                    session.add(ZoneRecord(
+                        id=zid, name=zid, cluster=cluster,
+                        servers_count=servers, cpu_total=cpu, ram_total_gb=ram,
+                    ))
+                logger.info("Seeded default zones")
+
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            logger.warning("Seed skipped: %s", e)
+        finally:
+            session.close()
+
+    # ---- Flavor operations ----
+
+    def list_flavors(self) -> list:
+        session = self.Session()
+        try:
+            return [r.to_dict() for r in session.query(FlavorRecord).order_by(FlavorRecord.name).all()]
+        finally:
+            session.close()
+
+    def get_flavor(self, flavor_id: str) -> Optional[dict]:
+        session = self.Session()
+        try:
+            r = session.query(FlavorRecord).filter_by(id=flavor_id).first()
+            return r.to_dict() if r else None
+        finally:
+            session.close()
+
+    def save_flavor(self, flavor_id: str, name: str, vcpus: int,
+                    ram_gb: int, disk_gb: int, description: str = "") -> dict:
+        session = self.Session()
+        try:
+            r = FlavorRecord(id=flavor_id, name=name, vcpus=vcpus,
+                             ram_gb=ram_gb, disk_gb=disk_gb, description=description)
+            session.merge(r)
+            session.commit()
+            return r.to_dict()
+        except Exception as e:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def delete_flavor(self, flavor_id: str):
+        session = self.Session()
+        try:
+            session.query(FlavorRecord).filter_by(id=flavor_id).delete()
+            session.commit()
+        except Exception as e:
+            session.rollback()
+        finally:
+            session.close()
+
+    # ---- Zone operations ----
+
+    def list_zones(self) -> list:
+        session = self.Session()
+        try:
+            return [r.to_dict() for r in session.query(ZoneRecord).order_by(ZoneRecord.name).all()]
+        finally:
+            session.close()
+
+    def list_zones_for_cluster(self, cluster: str) -> list:
+        session = self.Session()
+        try:
+            return [r.to_dict() for r in session.query(ZoneRecord).filter_by(cluster=cluster).all()]
+        finally:
+            session.close()
+
+    def save_zone(self, zone_id: str, name: str, cluster: str,
+                  servers: int = 0, cpu_total: int = 0, ram_total_gb: int = 0):
+        session = self.Session()
+        try:
+            r = ZoneRecord(id=zone_id, name=name, cluster=cluster,
+                           servers_count=servers, cpu_total=cpu_total, ram_total_gb=ram_total_gb)
+            session.merge(r)
+            session.commit()
+        except Exception as e:
+            session.rollback()
+        finally:
+            session.close()
+
+    # ---- User by email ----
+
+    def get_user_by_email(self, email: str) -> Optional[User]:
+        session = self.Session()
+        try:
+            record = session.query(UserRecord).filter_by(email=email, is_active=1).first()
+            return record.to_user() if record else None
         finally:
             session.close()
 

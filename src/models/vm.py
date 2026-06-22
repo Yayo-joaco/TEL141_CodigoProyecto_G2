@@ -40,6 +40,10 @@ class VM:
     error_message: Optional[str] = None
     enable_internet: bool = False
     image: Optional[str] = None
+    # Phase 2
+    flavor_id: Optional[str] = None
+    openstack_server_id: Optional[str] = None
+    ip_address_external: Optional[str] = None
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
 
     def __post_init__(self):
@@ -55,8 +59,10 @@ class VM:
             "host_ip": self.host_ip,
             "vcpus": self.vcpus,
             "ram_mb": self.ram_mb,
+            "ram_gb": round(self.ram_mb / 1024, 1),
             "disk_gb": self.disk_gb,
             "ip_address": self.ip_address,
+            "ip_address_external": self.ip_address_external,
             "mac_address": self.mac_address,
             "vnc_port": self.vnc_port,
             "vnc_ws_port": self.vnc_ws_port,
@@ -67,6 +73,8 @@ class VM:
             "status": self.status.value if isinstance(self.status, VMStatus) else self.status,
             "enable_internet": self.enable_internet,
             "image": self.image,
+            "flavor_id": self.flavor_id,
+            "openstack_server_id": self.openstack_server_id,
             "error_message": self.error_message,
             "created_at": self.created_at,
         }

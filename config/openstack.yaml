@@ -1,0 +1,44 @@
+# ==============================================================
+# PUCP Cloud Orchestrator - OpenStack Configuration
+# Cluster: 192.168.202.x  (Victoria on Ubuntu 20.04)
+# Grupo: G2
+# ==============================================================
+
+# ---------------------------------------------------------------
+# Admin credentials  (domain Cloud, project cloud_admin)
+# These are used by the OpenStack driver to manage resources.
+# ---------------------------------------------------------------
+auth:
+  auth_url: "http://192.168.202.1:5000/v3"
+  username: "cloud_admin"
+  password: "66c5f106f03328bbb47bd5ec609c320e"
+  project_name: "cloud_admin"
+  user_domain_name: "Cloud"
+  project_domain_name: "Cloud"
+  domain_name: "Cloud"          # domain where per-slice projects are created
+  identity_api_version: "3"
+  image_api_version: "2"
+
+# ---------------------------------------------------------------
+# Service endpoints  (direct, no tunnel needed from app server)
+# ---------------------------------------------------------------
+endpoints:
+  keystone:  "http://192.168.202.1:5000"
+  nova:      "http://192.168.202.1:8774"
+  neutron:   "http://192.168.202.1:9696"
+  glance:    "http://192.168.202.1:9292"
+  horizon:   "http://192.168.202.1:80"
+  novnc:     "http://192.168.202.1:6080"
+
+# ---------------------------------------------------------------
+# Nova API version for remote-consoles endpoint
+# ---------------------------------------------------------------
+nova:
+  compute_api_version: "2.6"
+  default_availability_zone: "nova"
+
+# ---------------------------------------------------------------
+# Token cache TTL (seconds) — Keystone tokens are valid for 1h,
+# we refresh 5 min before expiry.
+# ---------------------------------------------------------------
+token_cache_ttl: 3300

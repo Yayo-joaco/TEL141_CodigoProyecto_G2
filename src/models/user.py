@@ -24,6 +24,7 @@ class User:
     password_hash: str
     role: Role = Role.USER
     email: Optional[str] = None
+    cluster_assignment: str = "linux"   # linux | openstack | both
     is_active: bool = True
     max_vcpus: int = 16
     max_ram_mb: int = 16384
@@ -57,8 +58,10 @@ class User:
         return {
             "id": self.id,
             "username": self.username,
+            "name": self.username,
+            "email": self.email or f"{self.username}@pucp.pe",
             "role": self.role.value if isinstance(self.role, Role) else self.role,
-            "email": self.email,
+            "cluster_assignment": self.cluster_assignment,
             "is_active": self.is_active,
             "max_vcpus": self.max_vcpus,
             "max_ram_mb": self.max_ram_mb,

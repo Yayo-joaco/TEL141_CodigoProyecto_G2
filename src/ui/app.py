@@ -53,7 +53,12 @@ def load_configs():
         db_cfg = yaml.safe_load(f)
     with open(CONFIG_DIR / "network.yaml", "r") as f:
         net_cfg = yaml.safe_load(f)
-    return hosts_cfg, db_cfg, net_cfg
+    os_cfg = {}
+    os_yaml = CONFIG_DIR / "openstack.yaml"
+    if os_yaml.exists():
+        with open(os_yaml, "r") as f:
+            os_cfg = yaml.safe_load(f) or {}
+    return hosts_cfg, db_cfg, net_cfg, os_cfg
 
 
 _orchestrator = None
@@ -62,14 +67,16 @@ _orchestrator = None
 def get_orchestrator():
     global _orchestrator
     if _orchestrator is None:
-        hosts_cfg, db_cfg, net_cfg = load_configs()
+        hosts_cfg, db_cfg, net_cfg, os_cfg = load_configs()
         hosts = []
-        headnode = hosts_cfg["headnode"]
+        linux = hosts_cfg.get("linux_cluster", hosts_cfg)
+        headnode = linux.get("headnode", hosts_cfg.get("headnode", {}))
+        workers_cfg = linux.get("workers", hosts_cfg.get("workers", []))
         hosts.append(Host(hostname=headnode["hostname"], ip=headnode["ip"],
-                          role=HostRole.HEADNODE, port=headnode["port"]))
-        for w in hosts_cfg["workers"]:
+                          role=HostRole.HEADNODE, port=headnode.get("port", 22)))
+        for w in workers_cfg:
             hosts.append(Host(hostname=w["hostname"], ip=w["ip"],
-                             role=HostRole.WORKER, port=w["port"]))
+                             role=HostRole.WORKER, port=w.get("port", 22)))
         db = DatabaseManager(
             user=db_cfg["database"]["user"],
             password=db_cfg["database"]["password"],
@@ -79,18 +86,27 @@ def get_orchestrator():
         )
         for host in hosts:
             db.save_host(host)
-        ssh_key = hosts_cfg["ssh"].get("key_path", "/home/ubuntu/.ssh/id_rsa")
+        ssh_key = hosts_cfg.get("ssh", {}).get("key_path", "/home/ubuntu/.ssh/id_rsa")
         driver = LinuxDriver(ssh_key_path=ssh_key)
-        trunk_port = net_cfg.get("ovs", {}).get("trunk_port", "eth1")
-        nat_iface = net_cfg.get("internet", {}).get("nat_interface", "eth0")
+        trunk_port = net_cfg.get("linux", {}).get("ovs", {}).get("trunk_port") \
+                     or net_cfg.get("ovs", {}).get("trunk_port", "ens4")
+        nat_iface = net_cfg.get("linux", {}).get("internet", {}).get("nat_interface") \
+                    or net_cfg.get("internet", {}).get("nat_interface", "ens3")
         network = NetworkManager(ssh_key_path=ssh_key,
                                  headnode_ip=headnode["ip"],
                                  trunk_port=trunk_port,
                                  nat_iface=nat_iface)
-        base_image = hosts_cfg["base_image"]["path"]
-        _orchestrator = Orchestrator(hosts=hosts, driver=driver,
-                                     network=network, db=db,
-                                     base_image=base_image)
+        base_image = hosts_cfg.get("base_image", {}).get("path", "/home/ubuntu/cirros-base.img")
+
+        ovs2_ip = net_cfg.get("openstack", {}).get("ovs2", {}).get("ip") \
+                  or hosts_cfg.get("openstack_cluster", {}).get("ovs", {}).get("ip")
+        _orchestrator = Orchestrator(
+            hosts=hosts, driver=driver, network=network, db=db,
+            base_image=base_image,
+            openstack_cfg=os_cfg,
+            ovs2_ip=ovs2_ip,
+            ovs2_ssh_key=ssh_key,
+        )
         # Asegurar que la imagen de Ubuntu esté registrada
         img_list = db.list_images()
         ubuntu_exists = any(i["name"] == "ubuntu" for i in img_list)
@@ -107,6 +123,8 @@ def get_orchestrator():
         result = _orchestrator.refresh_hosts()
         logger.info("Hosts refreshed: %d OK, %d failed",
                      result["refreshed"], len(result.get("failed", [])))
+        # Seed demo users for Phase 2 demo
+        _orchestrator.auth.seed_demo_users()
     return _orchestrator
 
 
@@ -718,6 +736,553 @@ def ws_proxy(vm_id):
     gevent.joinall([g1, g2], timeout=600)
     app.logger.info("WS Proxy END: %s (b2r=%d, r2b=%d)", vm.name, counter['b2r'], counter['r2b'])
     return ''
+
+
+# =============================================================
+# REST API — helpers
+# =============================================================
+
+def _get_token() -> str:
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[7:]
+    return session.get("token", "")
+
+
+def _require_api_auth(required_role=None):
+    """Return (user, error_response). error_response is None if ok."""
+    orch = get_orchestrator()
+    token = _get_token()
+    ok, user, msg = orch.validate_request(token, required_role)
+    if not ok:
+        return None, (jsonify({"error": msg}), 401)
+    return user, None
+
+
+def _slice_to_ui(s: dict, vms: list = None) -> dict:
+    """Convert internal slice dict to Nueva UI shape."""
+    topo = s.get("topology_ui") or s.get("topology", "linear")
+    owner = s.get("created_by", "")
+    if "@" not in owner:
+        owner = f"{owner}@pucp.pe"
+    out = {
+        "id": s["id"],
+        "name": s["name"],
+        "topology": topo,
+        "status": _map_slice_status(s.get("status", "pending")),
+        "zone": s.get("zone_id") or "AZ-Compute-1",
+        "infrastructureTarget": s.get("infrastructure_target", "linux"),
+        "flavorId": s.get("flavor_id") or "small",
+        "owner": owner,
+        "createdAt": (s.get("created_at") or "")[:10],
+        "vlan_id": s.get("vlan_id"),
+        "subnet": s.get("subnet"),
+        "enable_dhcp": s.get("enable_dhcp"),
+        "enable_internet": s.get("enable_internet"),
+        "num_vms": s.get("num_vms"),
+        "error_message": s.get("error_message"),
+        "vms": [_vm_to_ui(v) for v in (vms or [])],
+        "logs": [],
+    }
+    return out
+
+
+def _vm_to_ui(v) -> dict:
+    d = v if isinstance(v, dict) else v.to_dict()
+    ip = d.get("ip_address_external") or d.get("ip_address") or ""
+    status_map = {"active": "running", "pending": "pending", "error": "error",
+                  "creating": "pending", "deleting": "stopped", "deleted": "stopped"}
+    return {
+        "id": d.get("id", ""),
+        "name": d.get("name", ""),
+        "status": status_map.get(d.get("status", "pending"), "pending"),
+        "ip": ip,
+        "cpu": d.get("vcpus", 1),
+        "ram": round(d.get("ram_mb", 512) / 1024, 1),
+        "disk": d.get("disk_gb", 2),
+        "host": d.get("host_ip", ""),
+        "image": d.get("image", ""),
+        "flavorId": d.get("flavor_id") or "small",
+        "vnc_port": d.get("vnc_port"),
+        "vnc_ws_port": d.get("vnc_ws_port"),
+        "openstack_server_id": d.get("openstack_server_id"),
+    }
+
+
+def _map_slice_status(s: str) -> str:
+    m = {"active": "running", "creating": "pending", "configuring_network": "pending",
+         "placing": "pending", "deleting": "stopped", "deleted": "deleted",
+         "error": "error", "pending": "pending"}
+    return m.get(s, s)
+
+
+# =============================================================
+# REST API — Auth
+# =============================================================
+
+@app.route("/api/auth/login", methods=["POST"])
+def api_login():
+    data = request.get_json(force=True) or {}
+    identifier = data.get("email") or data.get("username", "")
+    password = data.get("password", "")
+    if not identifier or not password:
+        return jsonify({"error": "email/username y password requeridos"}), 400
+    orch = get_orchestrator()
+    success, result = orch.login(identifier, password)
+    if not success:
+        return jsonify({"error": "Credenciales inválidas"}), 401
+    return jsonify({
+        "token": result["token"],
+        "user": {
+            "email": result.get("email", f"{result['username']}@pucp.pe"),
+            "name": result.get("name", result["username"]),
+            "role": result["role"],
+            "cluster_assignment": result.get("cluster_assignment", "linux"),
+        }
+    })
+
+
+@app.route("/api/auth/me")
+def api_me():
+    user, err = _require_api_auth()
+    if err:
+        return err
+    return jsonify({
+        "email": user.email or f"{user.username}@pucp.pe",
+        "name": user.username,
+        "role": user.role.value,
+        "cluster_assignment": getattr(user, "cluster_assignment", "linux"),
+    })
+
+
+@app.route("/api/auth/logout", methods=["POST"])
+def api_logout():
+    user, _ = _require_api_auth()
+    orch = get_orchestrator()
+    if user:
+        orch.logout(user.id)
+    session.clear()
+    return jsonify({"ok": True})
+
+
+# =============================================================
+# REST API — Slices
+# =============================================================
+
+@app.route("/api/slices", methods=["GET"])
+def api_list_slices():
+    user, err = _require_api_auth()
+    if err:
+        return err
+    orch = get_orchestrator()
+    raw = orch.list_slices(user=None if user.can_view_all_slices() else user)
+    result = []
+    for s in raw:
+        sd = s if isinstance(s, dict) else s.to_dict()
+        vms = orch.db.get_vms_for_slice(sd["id"])
+        result.append(_slice_to_ui(sd, vms))
+    return jsonify(result)
+
+
+@app.route("/api/slices", methods=["POST"])
+def api_create_slice():
+    user, err = _require_api_auth()
+    if err:
+        return err
+    data = request.get_json(force=True) or {}
+
+    # Resolve flavor → vcpus/ram_mb/disk_gb
+    orch = get_orchestrator()
+    flavor_id = data.get("flavorId") or data.get("flavor_id") or "small"
+    flavor = orch.db.get_flavor(flavor_id)
+    vcpus = data.get("vcpus") or (flavor["vcpus"] if flavor else 1)
+    ram_mb = data.get("ram_mb") or ((flavor["ramGb"] * 1024) if flavor else 512)
+    disk_gb = data.get("disk_gb") or (flavor["diskGb"] if flavor else 10)
+
+    owner = data.get("owner") or data.get("created_by") or user.email or user.username
+    infra = data.get("infrastructureTarget") or data.get("infrastructure_target") or "linux"
+    # Non-admin users use their assigned cluster
+    if user.role.value == "user":
+        infra = getattr(user, "cluster_assignment", "linux")
+
+    ticket_id = orch.create_slice_async(
+        name=data.get("name", "slice"),
+        topology=data.get("topology", "linear"),
+        num_vms=int(data.get("vmCount") or data.get("num_vms", 2)),
+        vcpus=int(vcpus), ram_mb=int(ram_mb), disk_gb=int(disk_gb),
+        enable_dhcp=data.get("enable_dhcp", False),
+        enable_internet=data.get("enable_internet", False),
+        created_by=owner,
+        vms_internet=data.get("vms_internet", []),
+        vms_image=data.get("vms_image", {}),
+        infrastructure_target=infra,
+        zone_id=data.get("zone") or data.get("zone_id"),
+        flavor_id=flavor_id,
+    )
+    return jsonify({"ticketId": ticket_id}), 202
+
+
+@app.route("/api/slices/<slice_id>", methods=["GET"])
+def api_get_slice(slice_id):
+    user, err = _require_api_auth()
+    if err:
+        return err
+    orch = get_orchestrator()
+    info = orch.get_slice(slice_id)
+    if not info:
+        return jsonify({"error": "not found"}), 404
+    sd = info["slice"]
+    if not user.can_view_all_slices() and sd.get("created_by") != (user.email or user.username):
+        return jsonify({"error": "forbidden"}), 403
+    vms = info.get("vms", [])
+    return jsonify(_slice_to_ui(sd, vms))
+
+
+@app.route("/api/slices/<slice_id>", methods=["DELETE"])
+def api_delete_slice(slice_id):
+    user, err = _require_api_auth()
+    if err:
+        return err
+    orch = get_orchestrator()
+    ticket_id = orch.delete_slice_async(slice_id, user=user)
+    return jsonify({"ticketId": ticket_id}), 202
+
+
+@app.route("/api/slices/<slice_id>", methods=["PATCH"])
+def api_edit_slice(slice_id):
+    user, err = _require_api_auth()
+    if err:
+        return err
+    orch = get_orchestrator()
+    data = request.get_json(force=True) or {}
+    ticket_id = orch.edit_slice_async(
+        slice_id=slice_id,
+        add_vms=int(data.get("add_vms", 0)),
+        remove_vm_ids=data.get("remove_vm_ids"),
+        user=user,
+    )
+    return jsonify({"ticketId": ticket_id}), 202
+
+
+@app.route("/api/slices/<slice_id>/vms")
+def api_slice_vms_json(slice_id):
+    user, err = _require_api_auth()
+    if err:
+        return err
+    orch = get_orchestrator()
+    vms = orch.db.get_vms_for_slice(slice_id)
+    return jsonify([_vm_to_ui(v) for v in vms])
+
+
+@app.route("/api/slices/<slice_id>/logs")
+def api_slice_logs(slice_id):
+    user, err = _require_api_auth()
+    if err:
+        return err
+    orch = get_orchestrator()
+    logs = orch.db.get_logs_for_slice(slice_id)
+    return jsonify([{
+        "ts": l.get("created_at", "")[:16].replace("T", " "),
+        "message": l.get("message", ""),
+        "level": l.get("level", "INFO"),
+        "module": l.get("module", ""),
+    } for l in logs])
+
+
+@app.route("/api/slices/<slice_id>/vms/<vm_id>/console")
+def api_vm_console(slice_id, vm_id):
+    user, err = _require_api_auth()
+    if err:
+        return err
+    orch = get_orchestrator()
+    vm = orch.db.get_vm_by_id(vm_id)
+    if not vm:
+        return jsonify({"error": "VM not found"}), 404
+    # For OpenStack VMs, delegate to OpenStack driver
+    if getattr(vm, "openstack_server_id", None):
+        try:
+            from ..drivers.openstack_driver import OpenStackDriver
+            os_driver = orch._get_openstack_driver()
+            url = os_driver.get_console_url(vm.openstack_server_id)
+            return jsonify({"url": url, "type": "novnc"})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    # Linux VMs — return websockify info
+    return jsonify({
+        "url": f"/console/{vm_id}",
+        "ws_port": vm.vnc_ws_port,
+        "type": "novnc_local",
+    })
+
+
+# =============================================================
+# REST API — Flavors
+# =============================================================
+
+@app.route("/api/flavors", methods=["GET"])
+def api_list_flavors():
+    _, err = _require_api_auth()
+    if err:
+        return err
+    orch = get_orchestrator()
+    return jsonify(orch.db.list_flavors())
+
+
+@app.route("/api/flavors", methods=["POST"])
+def api_create_flavor():
+    user, err = _require_api_auth()
+    if err:
+        return err
+    if user.role.value != "admin":
+        return jsonify({"error": "Admin only"}), 403
+    data = request.get_json(force=True) or {}
+    orch = get_orchestrator()
+    import uuid as _uuid
+    fid = data.get("id") or data.get("name") or str(_uuid.uuid4())[:8]
+    f = orch.db.save_flavor(
+        flavor_id=fid,
+        name=data.get("name", fid),
+        vcpus=int(data.get("vcpus", 1)),
+        ram_gb=int(data.get("ramGb", 1)),
+        disk_gb=int(data.get("diskGb", 10)),
+        description=data.get("description", ""),
+    )
+    return jsonify(f), 201
+
+
+@app.route("/api/flavors/<flavor_id>", methods=["DELETE"])
+def api_delete_flavor(flavor_id):
+    user, err = _require_api_auth()
+    if err:
+        return err
+    if user.role.value != "admin":
+        return jsonify({"error": "Admin only"}), 403
+    orch = get_orchestrator()
+    orch.db.delete_flavor(flavor_id)
+    return jsonify({"ok": True})
+
+
+# =============================================================
+# REST API — Images
+# =============================================================
+
+@app.route("/api/images", methods=["GET"])
+def api_list_images():
+    _, err = _require_api_auth()
+    if err:
+        return err
+    orch = get_orchestrator()
+    imgs = orch.list_images()
+    return jsonify([{
+        "id": i["id"], "name": i["name"], "os": i["name"],
+        "sizeGB": i.get("size_gb", 0), "uploadedAt": (i.get("created_at") or "")[:10],
+        "inUse": True, "format": i.get("format", "qcow2"), "path": i.get("path", ""),
+    } for i in imgs])
+
+
+@app.route("/api/images", methods=["POST"])
+def api_create_image():
+    user, err = _require_api_auth()
+    if err:
+        return err
+    if user.role.value != "admin":
+        return jsonify({"error": "Admin only"}), 403
+    data = request.get_json(force=True) or {}
+    orch = get_orchestrator()
+    result = orch.import_image(
+        name=data.get("name", ""),
+        filename=data.get("filename", ""),
+        path=data.get("path", ""),
+        format=data.get("format", "qcow2"),
+        size_gb=int(data.get("sizeGB", 2)),
+        uploaded_by=user.email or user.username,
+    )
+    return jsonify(result), 201
+
+
+# =============================================================
+# REST API — Servers / Hosts
+# =============================================================
+
+@app.route("/api/servers", methods=["GET"])
+def api_list_servers():
+    user, err = _require_api_auth()
+    if err:
+        return err
+    orch = get_orchestrator()
+    hosts = orch.get_hosts_status()
+    return jsonify([{
+        "id": h.get("hostname", ""),
+        "hostname": h.get("hostname", ""),
+        "ip": h.get("ip", ""),
+        "cpuTotal": h.get("total_vcpus", 0),
+        "cpuUsed": h.get("total_vcpus", 0) - h.get("available_vcpus", 0),
+        "ramTotal": round(h.get("total_ram_mb", 0) / 1024),
+        "ramUsed": round((h.get("total_ram_mb", 0) - h.get("available_ram_mb", 0)) / 1024),
+        "diskTotal": h.get("total_disk_gb", 0),
+        "diskUsed": h.get("total_disk_gb", 0) - h.get("available_disk_gb", 0),
+        "zone": h.get("zone_id", "AZ-Compute-1"),
+        "status": "online" if h.get("is_active") else "offline",
+        "vms_running": h.get("vms_running", 0),
+        "cluster": h.get("cluster", "linux"),
+    } for h in hosts])
+
+
+# =============================================================
+# REST API — Zones
+# =============================================================
+
+@app.route("/api/zones", methods=["GET"])
+def api_list_zones():
+    _, err = _require_api_auth()
+    if err:
+        return err
+    orch = get_orchestrator()
+    return jsonify(orch.db.list_zones())
+
+
+# =============================================================
+# REST API — Logs
+# =============================================================
+
+@app.route("/api/logs", methods=["GET"])
+def api_list_logs():
+    user, err = _require_api_auth()
+    if err:
+        return err
+    orch = get_orchestrator()
+    raw = orch.db.get_all_logs(limit=200)
+    return jsonify([{
+        "id": str(i),
+        "ts": l.get("created_at", "")[:16].replace("T", " "),
+        "severity": l.get("level", "INFO").lower(),
+        "sliceId": l.get("slice_id"),
+        "user": l.get("user_id"),
+        "message": l.get("message", ""),
+    } for i, l in enumerate(raw)])
+
+
+# =============================================================
+# REST API — Users (admin)
+# =============================================================
+
+@app.route("/api/users", methods=["GET"])
+def api_list_users():
+    user, err = _require_api_auth()
+    if err:
+        return err
+    if user.role.value not in ("admin", "operator"):
+        return jsonify({"error": "forbidden"}), 403
+    orch = get_orchestrator()
+    users = orch.list_users()
+    return jsonify([{
+        "id": u.get("id", ""),
+        "name": u.get("username", ""),
+        "email": u.get("email") or f"{u.get('username', '')}@pucp.pe",
+        "role": u.get("role", "user"),
+        "status": "active" if u.get("is_active") else "disabled",
+        "cluster_assignment": u.get("cluster_assignment", "linux"),
+        "slicesCount": 0,
+        "createdAt": (u.get("created_at") or "")[:10],
+    } for u in users])
+
+
+@app.route("/api/users", methods=["POST"])
+def api_create_user():
+    user, err = _require_api_auth()
+    if err:
+        return err
+    if user.role.value != "admin":
+        return jsonify({"error": "Admin only"}), 403
+    data = request.get_json(force=True) or {}
+    orch = get_orchestrator()
+    try:
+        role = Role(data.get("role", "user"))
+    except ValueError:
+        role = Role.USER
+    success, msg = orch.register(
+        username=data.get("username") or data.get("name", ""),
+        password=data.get("password", "pucp2026"),
+        role=role,
+        email=data.get("email"),
+        cluster_assignment=data.get("cluster_assignment", "linux"),
+    )
+    if not success:
+        return jsonify({"error": msg}), 400
+    return jsonify({"ok": True, "message": msg}), 201
+
+
+@app.route("/api/users/<user_id>", methods=["DELETE"])
+def api_delete_user(user_id):
+    user, err = _require_api_auth()
+    if err:
+        return err
+    if user.role.value != "admin":
+        return jsonify({"error": "Admin only"}), 403
+    orch = get_orchestrator()
+    orch.delete_user(user_id)
+    return jsonify({"ok": True})
+
+
+# =============================================================
+# REST API — Sessions
+# =============================================================
+
+@app.route("/api/sessions", methods=["GET"])
+def api_list_sessions():
+    user, err = _require_api_auth()
+    if err:
+        return err
+    if user.role.value not in ("admin", "operator"):
+        return jsonify({"error": "forbidden"}), 403
+    orch = get_orchestrator()
+    return jsonify(orch.get_active_sessions(user))
+
+
+# =============================================================
+# REST API — Tasks (async polling)
+# =============================================================
+
+@app.route("/api/tasks/<ticket_id>", methods=["GET"])
+def api_task_status_json(ticket_id):
+    _, err = _require_api_auth()
+    if err:
+        return err
+    orch = get_orchestrator()
+    task = orch.get_task_status(ticket_id)
+    if not task:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(task)
+
+
+# =============================================================
+# Catch-all: serve React SPA (Nueva UI build)
+# =============================================================
+
+import os as _os
+
+_UI_DIST = _os.path.join(_os.path.dirname(__file__), "..", "..", "Nueva UI", "dist")
+
+
+@app.route("/assets/<path:filename>")
+def ui_assets(filename):
+    return send_file(_os.path.join(_UI_DIST, "assets", filename))
+
+
+@app.route("/", defaults={"path": ""})
+@app.route("/<path:path>")
+def spa_fallback(path):
+    # API and WebSocket routes are already handled above — skip them here
+    if path.startswith("api/") or path.startswith("ws-proxy/"):
+        from flask import abort
+        abort(404)
+    index = _os.path.join(_UI_DIST, "index.html")
+    if _os.path.exists(index):
+        return send_file(index)
+    # Fallback to old Flask templates if dist not built yet
+    if "user_id" not in session:
+        return redirect(url_for("login_page"))
+    return redirect(url_for("index"))
 
 
 # =============================================================

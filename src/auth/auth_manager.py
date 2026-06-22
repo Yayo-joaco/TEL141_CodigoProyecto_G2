@@ -47,27 +47,38 @@ class AuthManager:
     def verify_password(self, password: str, password_hash: str) -> bool:
         return self.hash_password(password) == password_hash
 
-    def authenticate(self, username: str, password: str) -> Tuple[bool, Optional[dict]]:
-        user = self.db.get_user_by_username(username)
+    def authenticate(self, username_or_email: str, password: str) -> Tuple[bool, Optional[dict]]:
+        # Accept both email and username
+        if "@" in username_or_email:
+            user = self.db.get_user_by_email(username_or_email)
+        else:
+            user = self.db.get_user_by_username(username_or_email)
+
         if not user or not user.is_active:
-            logger.warning("Auth failed: user '%s' not found or inactive", username)
+            logger.warning("Auth failed: '%s' not found or inactive", username_or_email)
             return False, None
 
         if not self.verify_password(password, user.password_hash):
-            logger.warning("Auth failed: invalid password for '%s'", username)
+            logger.warning("Auth failed: invalid password for '%s'", username_or_email)
             return False, None
 
         token = self._generate_token(user)
         self._active_sessions[user.id] = {
             "token": token,
             "login_at": time.time(),
+            "user": user.username,
+            "role": user.role.value,
+            "ip": "",
         }
-        logger.info("User '%s' authenticated (role=%s)", username, user.role.value)
+        logger.info("User '%s' authenticated (role=%s)", user.username, user.role.value)
 
         return True, {
             "user_id": user.id,
             "username": user.username,
+            "email": user.email or f"{user.username}@pucp.pe",
+            "name": user.username,
             "role": user.role.value,
+            "cluster_assignment": getattr(user, "cluster_assignment", "linux"),
             "token": token,
         }
 
@@ -104,10 +115,15 @@ class AuthManager:
         logger.info("User %s logged out", user_id)
 
     def register_user(self, username: str, password: str,
-                      role: Role = Role.USER, email: str = None) -> Tuple[bool, str]:
+                      role: Role = Role.USER, email: str = None,
+                      cluster_assignment: str = "linux") -> Tuple[bool, str]:
         existing = self.db.get_user_by_username(username)
         if existing:
             return False, "El usuario ya existe"
+        if email:
+            existing_email = self.db.get_user_by_email(email)
+            if existing_email:
+                return False, "El email ya está registrado"
 
         password_hash = self.hash_password(password)
         user = User(
@@ -116,16 +132,35 @@ class AuthManager:
             password_hash=password_hash,
             role=role,
             email=email,
+            cluster_assignment=cluster_assignment,
         )
         self.db.save_user(user)
-        logger.info("User '%s' registered (role=%s)", username, role.value)
+        logger.info("User '%s' registered (role=%s, cluster=%s)", username, role.value, cluster_assignment)
         return True, user.id
+
+    def seed_demo_users(self):
+        """Create default demo users if they don't exist."""
+        demos = [
+            ("admin",    "admin123",    Role.ADMIN,    "admin@pucp.pe",    "both"),
+            ("operador", "op123",       Role.OPERATOR, "operador@pucp.pe", "both"),
+            ("user",     "user123",     Role.USER,     "user@pucp.pe",     "linux"),
+        ]
+        for username, password, role, email, cluster in demos:
+            if not self.db.get_user_by_username(username):
+                self.register_user(username, password, role, email, cluster)
+                logger.info("Demo user seeded: %s (%s)", username, email)
 
     def get_active_sessions(self, user: User) -> list:
         if not user.can_view_all_slices():
             return []
         return [
-            {"user_id": uid, "login_at": datetime.fromtimestamp(s["login_at"]).isoformat()}
+            {
+                "id": uid,
+                "user": s.get("user", uid),
+                "role": s.get("role", "user"),
+                "loginTime": __import__('datetime').datetime.fromtimestamp(s["login_at"]).isoformat(),
+                "ip": s.get("ip", ""),
+            }
             for uid, s in self._active_sessions.items()
         ]
 

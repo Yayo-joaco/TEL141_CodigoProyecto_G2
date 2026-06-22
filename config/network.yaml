@@ -1,25 +1,55 @@
 # ==============================================================
 # PUCP Cloud Orchestrator - Network Configuration
 # Grupo: G2
-# Rango asignado: 10.60.3.0/24 (Linux Cluster)
+# Fase 2: Linux Cluster 10.60.3.0/24  |  OpenStack 10.60.4.0/24
 # ==============================================================
 
-network:
-  vlan_id: 300
-  subnet: "10.60.3.0/24"
-  gateway: "10.60.3.1"
-  dns: "8.8.8.8"
+# ---------------------------------------------------------------
+# Linux Cluster networking
+# ---------------------------------------------------------------
+linux:
+  vlan_pool_start: 100
+  vlan_pool_end:   300
+  subnet_prefix: "10.60.3"   # .0/24 — slices get /28 subnets from this range
 
-  dhcp:
-    enabled: false
-    start_ip: "10.60.3.100"
-    end_ip: "10.60.3.200"
-    lease_time: "12h"
+  ovs:
+    bridge_name: "br-int"
+    trunk_port: "ens4"
 
-ovs:
-  bridge_name: "br-int"
-  trunk_port: "ens4"
+  internet:
+    enabled: true
+    nat_interface: "ens3"
 
-internet:
-  enabled: false
-  nat_interface: "ens3"
+# ---------------------------------------------------------------
+# OpenStack Cluster networking
+# ---------------------------------------------------------------
+openstack:
+  vlan_pool_start: 11
+  vlan_pool_end:   900
+  vlan_reserved: [14]          # VLAN 14 = external/br-provider, never pruned
+
+  external_network:
+    name: "external"
+    subnet_name: "external_subnet"
+    cidr: "10.60.4.0/24"
+    gateway: "10.60.4.1"
+    dns: "8.8.8.8"
+    allocation_start: "10.60.4.2"
+    allocation_end:   "10.60.4.254"
+    physnet: "physnet0"
+    network_type: "flat"
+
+  tenant_network:
+    physnet: "physnet1"
+    network_type: "vlan"
+
+  # OVS2 (192.168.202.5) trunk port → node mapping
+  # Used by OVS2NetworkingModule to set per-port trunks (R5.6)
+  ovs2:
+    ip: "192.168.202.5"
+    ssh_user: "ubuntu"
+    ports:
+      headnode:  "ens4"   # controller  192.168.202.1
+      compute1:  "ens5"   # worker1     192.168.202.2
+      compute2:  "ens6"   # worker2     192.168.202.3
+      compute3:  "ens7"   # worker3     192.168.202.4

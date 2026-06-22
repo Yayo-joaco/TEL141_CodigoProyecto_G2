@@ -272,6 +272,32 @@ class LinuxDriver(BaseDriver):
             vm_disk = f"{self.VM_BASE_DIR}/{vm_name}/{vm_name}.qcow2"
             vnc_display = vm.vnc_port - self.vnc_base_port
 
+            # Update netplan inside the disk so all current interfaces are declared.
+            # Without this, Ubuntu fails to apply the config when a new link
+            # interface (e.g. ens6) appears that wasn't in the original netplan.
+            if (vm.image or "").lower() == "ubuntu":
+                link_ifaces = [ifc for ifc in (vm.interfaces or [])
+                               if ifc.get("type") == "link"]
+                netplan_lines = [
+                    "network:\n", "  version: 2\n", "  ethernets:\n",
+                    "    ens3:\n", "      dhcp4: true\n",
+                ]
+                for i in range(len(link_ifaces)):
+                    iface = f"ens{i + 4}"
+                    netplan_lines += [
+                        f"    {iface}:\n",
+                        f"      dhcp4: false\n",
+                        f"      link-local: []\n",
+                    ]
+                netplan_yaml = "".join(netplan_lines)
+                np_b64 = base64.b64encode(netplan_yaml.encode()).decode()
+                self._exec(client,
+                           f"echo {np_b64} | base64 -d > /tmp/{vm_name}-netplan.yaml && "
+                           f"sudo virt-customize -a {vm_disk} "
+                           f"--upload /tmp/{vm_name}-netplan.yaml:/etc/netplan/99-ens3-dhcp.yaml "
+                           f"--quiet 2>/dev/null || true",
+                           timeout=120)
+
             qemu_cmd = (
                 f"sudo qemu-system-x86_64 "
                 f"-name {vm_name} "

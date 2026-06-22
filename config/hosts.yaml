@@ -1,43 +1,96 @@
 # ==============================================================
 # PUCP Cloud Orchestrator - Hosts Configuration
 # Grupo: G2
-# Fase: 1 - Linux Cluster
+# Fase: 2 - App server → Linux Cluster + OpenStack Cluster
 # ==============================================================
 
-headnode:
-  hostname: server1
-  ip: "10.0.10.1"
-  port: 22
-  user: "ubuntu"
+# App server (runs all backend code)
+app_server:
+  hostname: "app"
+  ip: "localhost"      # adjust if app server has its own IP
   role: "orchestrator"
 
-workers:
-  - hostname: server2
-    ip: "10.0.10.2"
+# ---------------------------------------------------------------
+# Linux Cluster  (192.168.201.x)
+# ---------------------------------------------------------------
+linux_cluster:
+  headnode:
+    hostname: "server1"
+    ip: "192.168.201.1"
     port: 22
     user: "ubuntu"
-    role: "compute"
+    role: "headnode"
 
-  - hostname: server3
-    ip: "10.0.10.3"
+  workers:
+    - hostname: "server2"
+      ip: "192.168.201.2"
+      port: 22
+      user: "ubuntu"
+      role: "worker"
+    - hostname: "server3"
+      ip: "192.168.201.3"
+      port: 22
+      user: "ubuntu"
+      role: "worker"
+    - hostname: "server4"
+      ip: "192.168.201.4"
+      port: 22
+      user: "ubuntu"
+      role: "worker"
+
+  ovs:
+    hostname: "ovs1"
+    ip: "192.168.201.5"
     port: 22
     user: "ubuntu"
-    role: "compute"
+    role: "ovs"
 
-  - hostname: server4
-    ip: "10.0.10.4"
+# ---------------------------------------------------------------
+# OpenStack Cluster  (192.168.202.x)
+# ---------------------------------------------------------------
+openstack_cluster:
+  headnode:
+    hostname: "controller"
+    ip: "192.168.202.1"
     port: 22
     user: "ubuntu"
-    role: "compute"
+    role: "openstack_headnode"
 
-gateway:
-  ip: "10.20.12.246"
+  workers:
+    - hostname: "compute1"
+      ip: "192.168.202.2"
+      port: 22
+      user: "ubuntu"
+      role: "openstack_worker"
+    - hostname: "compute2"
+      ip: "192.168.202.3"
+      port: 22
+      user: "ubuntu"
+      role: "openstack_worker"
+    - hostname: "compute3"
+      ip: "192.168.202.4"
+      port: 22
+      user: "ubuntu"
+      role: "openstack_worker"
 
+  ovs:
+    hostname: "ovs2"
+    ip: "192.168.202.5"
+    port: 22
+    user: "ubuntu"
+    role: "ovs"
+
+# ---------------------------------------------------------------
+# SSH
+# ---------------------------------------------------------------
 ssh:
   key_path: "/home/ubuntu/.ssh/id_rsa"
   timeout: 30
   sudo: true
 
+# ---------------------------------------------------------------
+# VM defaults
+# ---------------------------------------------------------------
 vm_resources:
   default_vcpus: 1
   default_ram_mb: 512

@@ -4,7 +4,7 @@
 
 import json
 import logging
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 
 from .models.slice import Slice, SliceStatus, TopologyType
 from .models.vm import VM, VMStatus
@@ -25,7 +25,9 @@ logger = logging.getLogger("orchestrator")
 class Orchestrator:
     def __init__(self, hosts: List[Host], driver: LinuxDriver,
                  network: NetworkManager, db: DatabaseManager,
-                 base_image: str = "/home/ubuntu/cirros-base.img"):
+                 base_image: str = "/home/ubuntu/cirros-base.img",
+                 openstack_cfg: dict = None,
+                 ovs2_ip: str = None, ovs2_ssh_key: str = None):
         self.hosts = hosts
         self.driver = driver
         self.network = network
@@ -35,6 +37,49 @@ class Orchestrator:
         self.slice_manager = SliceManager(driver, network, db, base_image)
         self.auth = AuthManager(db)
         self.task_queue = TaskQueue()
+        self._os_cfg = openstack_cfg or {}
+        self._os_driver = None          # lazy-loaded
+        self._ovs2_ip = ovs2_ip
+        self._ovs2_ssh_key = ovs2_ssh_key
+        self._ovs2 = None               # lazy-loaded
+
+    # ---- Internal helpers ----
+
+    def _get_openstack_driver(self):
+        if self._os_driver is None:
+            from .drivers.openstack_driver import OpenStackDriver
+            auth = self._os_cfg.get("auth", {})
+            ep = self._os_cfg.get("endpoints", {})
+            self._os_driver = OpenStackDriver(
+                auth_url=ep.get("keystone", "http://192.168.202.1:5000"),
+                username=auth.get("username", "cloud_admin"),
+                password=auth.get("password", ""),
+                project_name=auth.get("project_name", "cloud_admin"),
+                domain_name=auth.get("domain_name", "Cloud"),
+                nova_url=ep.get("nova", "http://192.168.202.1:8774"),
+                neutron_url=ep.get("neutron", "http://192.168.202.1:9696"),
+                glance_url=ep.get("glance", "http://192.168.202.1:9292"),
+                novnc_base=ep.get("novnc", "http://192.168.202.1:6080"),
+                token_cache_ttl=self._os_cfg.get("token_cache_ttl", 3300),
+            )
+        return self._os_driver
+
+    def _get_ovs2(self):
+        if self._ovs2 is None and self._ovs2_ip and self._ovs2_ssh_key:
+            from .networking.ovs2_manager import OVS2Manager
+            self._ovs2 = OVS2Manager(self._ovs2_ip, self._ovs2_ssh_key)
+        return self._ovs2
+
+    def _pick_infra(self, requested: str, user: User = None) -> str:
+        """Resolve 'auto' → 'linux' or 'openstack' based on resource load."""
+        if requested == "auto":
+            # If OpenStack is configured, prefer it when Linux workers are heavily loaded
+            workers = [h for h in self.hosts if h.is_active]
+            if not workers:
+                return "openstack" if self._os_cfg else "linux"
+            avg_free_ram = sum(h.available_ram_mb for h in workers) / len(workers)
+            return "openstack" if avg_free_ram < 512 and self._os_cfg else "linux"
+        return requested or "linux"
 
     # ---- Authentication ----
 
@@ -42,8 +87,9 @@ class Orchestrator:
         return self.auth.authenticate(username, password)
 
     def register(self, username: str, password: str,
-                 role: Role = Role.USER, email: str = None) -> Tuple[bool, str]:
-        return self.auth.register_user(username, password, role, email)
+                 role: Role = Role.USER, email: str = None,
+                 cluster_assignment: str = "linux") -> Tuple[bool, str]:
+        return self.auth.register_user(username, password, role, email, cluster_assignment)
 
     def logout(self, user_id: str):
         self.auth.logout(user_id)
@@ -58,7 +104,10 @@ class Orchestrator:
                      enable_dhcp: bool = False, enable_internet: bool = False,
                      created_by: str = "admin",
                      vms_internet: List[int] = None,
-                     vms_image: dict = None) -> dict:
+                     vms_image: dict = None,
+                     infrastructure_target: str = "linux",
+                     zone_id: str = None,
+                     flavor_id: str = None) -> dict:
         try:
             topo = TopologyType(topology)
         except ValueError:
@@ -68,11 +117,16 @@ class Orchestrator:
         if num_vms < 1:
             return {"success": False, "error": "Se necesita al menos 1 VM"}
 
+        infra = self._pick_infra(infrastructure_target or "linux")
+
         slice_obj = Slice(
             id="", name=name, topology=topo, num_vms=num_vms,
             vcpus_per_vm=vcpus, ram_mb_per_vm=ram_mb, disk_gb_per_vm=disk_gb,
             enable_dhcp=enable_dhcp, enable_internet=enable_internet,
             status=SliceStatus.CREATING, created_by=created_by,
+            infrastructure_target=infra,
+            zone_id=zone_id,
+            flavor_id=flavor_id,
         )
 
         # Auto-assign VLAN and subnet (R5.3 + R1C.3 + R1.5)
@@ -103,34 +157,55 @@ class Orchestrator:
                     image=vm_img)
             vms.append(vm)
 
-        plan = self.placement_engine.place_vms(slice_obj.id, vms)
-        if not plan.success:
-            slice_obj.status = SliceStatus.ERROR
-            slice_obj.error_message = plan.error_message
-            self.db.save_slice(slice_obj)
-            self.db.release_vlan(slice_obj.id)
-            self.db.save_log(slice_obj.id, "orchestrator", "ERROR",
-                             f"Placement failed: {plan.error_message}", user_id=created_by)
-            return {"success": False, "error": plan.error_message}
+        # Linux placement (skipped for OpenStack — placement done inside _create_slice_openstack)
+        if infra != "openstack":
+            plan = self.placement_engine.place_vms(slice_obj.id, vms)
+            if not plan.success:
+                slice_obj.status = SliceStatus.ERROR
+                slice_obj.error_message = plan.error_message
+                self.db.save_slice(slice_obj)
+                self.db.release_vlan(slice_obj.id)
+                self.db.save_log(slice_obj.id, "orchestrator", "ERROR",
+                                 f"Placement failed: {plan.error_message}", user_id=created_by)
+                return {"success": False, "error": plan.error_message}
 
-        allocated_ports: dict = {}  # host_ip -> set of vnc ports reserved this run
-        for vm, decision in zip(vms, plan.decisions):
-            vm.host_ip = decision.host_ip
-            extra = allocated_ports.get(vm.host_ip, set())
-            ports = self.db.allocate_vm_ports(vm.host_ip, extra_used=extra)
-            vm.vnc_port = ports["vnc_port"]
-            vm.vnc_ws_port = ports["vnc_ws_port"]
-            allocated_ports.setdefault(vm.host_ip, set()).add(ports["vnc_port"])
+            allocated_ports: dict = {}
+            for vm, decision in zip(vms, plan.decisions):
+                vm.host_ip = decision.host_ip
+                extra = allocated_ports.get(vm.host_ip, set())
+                ports = self.db.allocate_vm_ports(vm.host_ip, extra_used=extra)
+                vm.vnc_port = ports["vnc_port"]
+                vm.vnc_ws_port = ports["vnc_ws_port"]
+                allocated_ports.setdefault(vm.host_ip, set()).add(ports["vnc_port"])
 
-        created_vms = self.slice_manager.create_slice(slice_obj, pre_placed_vms=vms)
+        if infra == "openstack":
+            created_vms = self._create_slice_openstack(slice_obj, vms)
+        else:
+            created_vms = self.slice_manager.create_slice(slice_obj, pre_placed_vms=vms)
+
         if not created_vms:
             self.db.release_vlan(slice_obj.id)
             return {"success": False, "error": "Fallo en despliegue del slice"}
 
+        # OVS2 VLAN pruning (R5.6) — only for Linux cluster
+        if infra == "linux":
+            worker_hosts = list({vm.host_ip for vm in created_vms if vm.host_ip})
+            worker_names = []
+            for ip in worker_hosts:
+                h = next((h for h in self.hosts if h.ip == ip), None)
+                if h:
+                    worker_names.append(h.hostname)
+            vlan_ids = [slice_obj.vlan_id] if slice_obj.vlan_id else []
+            if hasattr(slice_obj, "link_vlans") and slice_obj.link_vlans:
+                vlan_ids += [lv["vlan_id"] for lv in slice_obj.link_vlans if lv.get("vlan_id")]
+            ovs2 = self._get_ovs2()
+            if ovs2 and vlan_ids:
+                ovs2.add_slice_vlans(vlan_ids, worker_names)
+
         links = Topology.get_links(topo, num_vms)
         self.db.save_log(slice_obj.id, "orchestrator", "INFO",
                          f"Slice '{name}' creado: {num_vms} VMs, VLAN={slice_obj.vlan_id}, "
-                         f"subnet={slice_obj.subnet}, topologia={topology}",
+                         f"subnet={slice_obj.subnet}, topologia={topology}, infra={infra}",
                          user_id=created_by)
 
         self.refresh_hosts()
@@ -140,6 +215,55 @@ class Orchestrator:
             "vlan_id": slice_obj.vlan_id, "subnet": slice_obj.subnet,
             "vms": [vm.to_dict() for vm in created_vms], "links": links,
         }
+
+    def _create_slice_openstack(self, slice_obj: Slice, vms: List[VM]) -> List[VM]:
+        """
+        Custom placement on OpenStack:
+        1. Query Nova hypervisor stats.
+        2. Run our scoring algorithm (most free RAM, round-robin tie-break).
+        3. Force placement via availability_zone="nova:<hostname>".
+        """
+        os_drv = self._get_openstack_driver()
+        try:
+            hypervisors = os_drv.get_hypervisor_stats()
+        except Exception as e:
+            logger.error("Cannot fetch hypervisor stats: %s", e)
+            hypervisors = []
+
+        active_hvs = [h for h in hypervisors if h.get("state") == "up"
+                      and h.get("status") == "enabled"]
+
+        # Build force_hosts map: assign VMs round-robin by free RAM score
+        force_hosts: Dict[str, str] = {}
+        if active_hvs:
+            sorted_hvs = sorted(active_hvs, key=lambda h: h["free_ram_mb"], reverse=True)
+            for i, vm in enumerate(vms):
+                hv = sorted_hvs[i % len(sorted_hvs)]
+                force_hosts[vm.name] = hv["hostname"]
+                logger.info("OS placement: %s → %s (free_ram=%dMB)",
+                            vm.name, hv["hostname"], hv["free_ram_mb"])
+
+        try:
+            result = os_drv.deploy_slice(slice_obj, vms, force_hosts=force_hosts)
+        except Exception as e:
+            logger.error("OpenStack deploy_slice failed: %s", e)
+            slice_obj.status = SliceStatus.ERROR
+            slice_obj.error_message = str(e)
+            self.db.save_slice(slice_obj)
+            return []
+
+        if result.get("errors"):
+            logger.warning("OS deploy had errors: %s", result["errors"])
+
+        slice_obj.openstack_project_id = result.get("project_id", "")
+        net_ids = [result["network_id"]] if result.get("network_id") else []
+        slice_obj.openstack_network_ids = json.dumps(net_ids)
+        slice_obj.status = SliceStatus.ACTIVE
+        self.db.save_slice(slice_obj)
+        for vm in vms:
+            vm.status = VMStatus.ACTIVE
+            self.db.save_vm(vm)
+        return vms
 
     def edit_slice(self, slice_id: str, add_vms: int = 0,
                    remove_vm_ids: List[str] = None,
@@ -200,10 +324,40 @@ class Orchestrator:
         vms = self.db.get_vms_for_slice(slice_id)
         for vm in vms:
             self.placement_engine.release_vm(vm)
-        success = self.slice_manager.delete_slice(slice_id)
+
+        infra = getattr(slice_obj, "infrastructure_target", "linux") if slice_obj else "linux"
+
+        if infra == "openstack" and slice_obj:
+            try:
+                os_drv = self._get_openstack_driver()
+                os_drv.teardown_slice(slice_obj, vms)
+            except Exception as e:
+                logger.error("OS teardown failed for slice %s: %s", slice_id, e)
+            slice_obj.status = SliceStatus.DELETED
+            self.db.save_slice(slice_obj)
+            for vm in vms:
+                vm.status = VMStatus.DELETED
+                self.db.save_vm(vm)
+            success = True
+        else:
+            # OVS2 VLAN pruning cleanup
+            if slice_obj:
+                worker_names = []
+                for vm in vms:
+                    h = next((h for h in self.hosts if h.ip == vm.host_ip), None)
+                    if h:
+                        worker_names.append(h.hostname)
+                vlan_ids = [slice_obj.vlan_id] if slice_obj.vlan_id else []
+                if hasattr(slice_obj, "link_vlans") and slice_obj.link_vlans:
+                    vlan_ids += [lv["vlan_id"] for lv in slice_obj.link_vlans if lv.get("vlan_id")]
+                ovs2 = self._get_ovs2()
+                if ovs2 and vlan_ids:
+                    ovs2.remove_slice_vlans(vlan_ids, list(set(worker_names)))
+            success = self.slice_manager.delete_slice(slice_id)
+
         self.db.release_vlan(slice_id)
         self.db.save_log(slice_id, "orchestrator", "INFO",
-                         f"Slice eliminado, VLAN liberada",
+                         f"Slice eliminado, VLAN liberada, infra={infra}",
                          user_id=user.id if user else None)
         self.refresh_hosts()
         return {"success": success, "slice_id": slice_id}
@@ -375,13 +529,17 @@ class Orchestrator:
                            enable_dhcp: bool = False, enable_internet: bool = False,
                            created_by: str = "admin",
                            vms_internet: List[int] = None,
-                           vms_image: dict = None) -> str:
+                           vms_image: dict = None,
+                           infrastructure_target: str = "linux",
+                           zone_id: str = None,
+                           flavor_id: str = None) -> str:
         return self.task_queue.enqueue(
             f"create_slice:{name}",
             self.create_slice,
             name, topology, num_vms, vcpus, ram_mb, disk_gb,
             enable_dhcp, enable_internet, created_by,
             vms_internet, vms_image,
+            infrastructure_target, zone_id, flavor_id,
         )
 
     def delete_slice_async(self, slice_id: str, user: User = None) -> str:
