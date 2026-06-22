@@ -4,6 +4,7 @@
 
 import json
 import logging
+import time
 from typing import List, Optional, Tuple, Dict
 
 from .models.slice import Slice, SliceStatus, TopologyType
@@ -216,11 +217,136 @@ class Orchestrator:
             "vms": [vm.to_dict() for vm in created_vms], "links": links,
         }
 
+    # ------------------------------------------------------------------
+    # OpenStack multi-criteria placement
+    # ------------------------------------------------------------------
+
+    # Scoring weights (must sum to 1.0)
+    _ALPHA = 0.50   # RAM utilization weight — hard resource, no overcommit
+    _BETA  = 0.30   # CPU utilization weight — soft, allows overcommit
+    _GAMMA = 0.20   # batch-concentration penalty — discourages piling VMs on one host
+    _CPU_OVERCOMMIT = 2.0    # CPUs can be shared; dynamic VMs rarely use 100% simultaneously
+    _PLACEMENT_TIMEOUT = 30  # seconds — cap execution for large slices (R4.6)
+
+    def _place_vms_openstack(self, vms: List[VM], hypervisors: List[dict],
+                              zone_id: str = None) -> Dict[str, str]:
+        """
+        Objective: minimise max weighted utilisation after placement.
+
+        Per-host score (lower = better):
+            α * (ram_after / ram_total)
+          + β * (cpu_after / (cpu_total * CPU_OVERCOMMIT))
+          + γ * (vms_assigned_this_batch / total_vms)
+
+        Virtual state tracks VMs already assigned in this batch but not yet
+        booted — Nova stats don't reflect them yet (R4.4).
+        The whole slice is placed as a unit before any VM boots (R4.5).
+        RAM is a hard constraint; CPU allows overcommit (R4.3).
+        """
+        deadline = time.time() + self._PLACEMENT_TIMEOUT
+
+        candidates = [
+            h for h in hypervisors
+            if h.get("state") == "up"
+            and h.get("status") == "enabled"
+            and h.get("total_ram_mb", 0) > 0
+        ]
+
+        if not candidates:
+            logger.warning("OS placement: no active hypervisors — Nova will decide")
+            return {}
+
+        # Zone filter (R4.7): match zone_id against hypervisor hostname substring
+        if zone_id:
+            zone_matches = [h for h in candidates
+                            if zone_id.lower() in h["hostname"].lower()]
+            if zone_matches:
+                candidates = zone_matches
+                logger.info("OS placement: zone=%s filtered to %d hypervisor(s)",
+                            zone_id, len(candidates))
+            else:
+                logger.warning("OS placement: zone=%s matched no hypervisors — using all",
+                               zone_id)
+
+        # Virtual state per hostname — accumulates what we've assigned so far
+        vram:  Dict[str, int] = {h["hostname"]: 0 for h in candidates}
+        vcpu:  Dict[str, int] = {h["hostname"]: 0 for h in candidates}
+        batch: Dict[str, int] = {h["hostname"]: 0 for h in candidates}
+        total_vms = len(vms)
+
+        force_hosts: Dict[str, str] = {}
+
+        for vm in vms:
+            if time.time() > deadline:
+                # Graceful degradation: let Nova place remaining VMs itself
+                logger.warning(
+                    "OS placement timeout after %ds — remaining VMs placed by Nova scheduler",
+                    self._PLACEMENT_TIMEOUT,
+                )
+                break
+
+            best_host = None
+            best_score = float("inf")
+
+            for h in candidates:
+                hn = h["hostname"]
+                ram_total = h["total_ram_mb"]
+                cpu_total = h["total_vcpus"]
+
+                # Project utilisation after adding this VM (current + virtual batch)
+                ram_after = (ram_total - h["free_ram_mb"]) + vram[hn] + vm.ram_mb
+                cpu_after = (cpu_total - h["free_vcpus"]) + vcpu[hn] + vm.vcpus
+
+                # Hard RAM constraint
+                if ram_after > ram_total:
+                    continue
+
+                # Soft CPU constraint with overcommit
+                if cpu_after > cpu_total * self._CPU_OVERCOMMIT:
+                    continue
+
+                score = (
+                    self._ALPHA * (ram_after / ram_total)
+                    + self._BETA  * (cpu_after / (cpu_total * self._CPU_OVERCOMMIT))
+                    + self._GAMMA * (batch[hn] / max(total_vms, 1))
+                )
+
+                if score < best_score:
+                    best_score = score
+                    best_host = h
+
+            if best_host is None:
+                logger.warning(
+                    "OS placement: no host can fit VM %s "
+                    "(need ram=%dMB cpu=%d) — Nova will decide",
+                    vm.name, vm.ram_mb, vm.vcpus,
+                )
+                continue
+
+            hn = best_host["hostname"]
+            force_hosts[vm.name] = hn
+            vram[hn]  += vm.ram_mb
+            vcpu[hn]  += vm.vcpus
+            batch[hn] += 1
+
+            logger.info(
+                "OS placement: %s → %s  score=%.3f "
+                "(ram_util=%.0f%%, cpu_util=%.0f%%, batch_on_host=%d)",
+                vm.name, hn, best_score,
+                ((best_host["total_ram_mb"] - best_host["free_ram_mb"]) + vram[hn])
+                / best_host["total_ram_mb"] * 100,
+                ((best_host["total_vcpus"] - best_host["free_vcpus"]) + vcpu[hn])
+                / (best_host["total_vcpus"] * self._CPU_OVERCOMMIT) * 100,
+                batch[hn],
+            )
+
+        return force_hosts
+
     def _create_slice_openstack(self, slice_obj: Slice, vms: List[VM]) -> List[VM]:
         """
         Custom placement on OpenStack:
         1. Query Nova hypervisor stats.
-        2. Run our scoring algorithm (most free RAM, round-robin tie-break).
+        2. Run multi-criteria scoring algorithm.
         3. Force placement via availability_zone="nova:<hostname>".
         """
         os_drv = self._get_openstack_driver()
@@ -230,18 +356,9 @@ class Orchestrator:
             logger.error("Cannot fetch hypervisor stats: %s", e)
             hypervisors = []
 
-        active_hvs = [h for h in hypervisors if h.get("state") == "up"
-                      and h.get("status") == "enabled"]
-
-        # Build force_hosts map: assign VMs round-robin by free RAM score
-        force_hosts: Dict[str, str] = {}
-        if active_hvs:
-            sorted_hvs = sorted(active_hvs, key=lambda h: h["free_ram_mb"], reverse=True)
-            for i, vm in enumerate(vms):
-                hv = sorted_hvs[i % len(sorted_hvs)]
-                force_hosts[vm.name] = hv["hostname"]
-                logger.info("OS placement: %s → %s (free_ram=%dMB)",
-                            vm.name, hv["hostname"], hv["free_ram_mb"])
+        force_hosts = self._place_vms_openstack(
+            vms, hypervisors, zone_id=slice_obj.zone_id
+        )
 
         try:
             result = os_drv.deploy_slice(slice_obj, vms, force_hosts=force_hosts)
