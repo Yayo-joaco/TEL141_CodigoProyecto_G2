@@ -1,27 +1,57 @@
 #!/bin/bash
-# ==============================================================
-# PUCP Cloud Orchestrator - Deploy Script
-# Transfer code from local machine to Server1 via SCP
-# Usage: ./deploy.sh <server_ip>
-# ==============================================================
-
+# =============================================================
+# deploy.sh — pull latest code, rebuild frontend, restart backend
+# Run once on the app server after cloning, then use for updates.
+# Usage: bash scripts/deploy.sh
+# =============================================================
 set -e
 
-SERVER_IP=${1:-"10.0.10.1"}
-REMOTE_USER="ubuntu"
-REMOTE_PATH="/home/ubuntu/pucp-cloud-orchestrator"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+UI_DIR="$PROJECT_DIR/Nueva UI"
+LOG_DIR="$PROJECT_DIR/logs"
 
-echo "Deploying to ${REMOTE_USER}@${SERVER_IP}:${REMOTE_PATH}"
+echo "=== PUCP Cloud Orchestrator — Deploy ==="
+echo "Project: $PROJECT_DIR"
 
-# Create remote directory
-ssh ${REMOTE_USER}@${SERVER_IP} "mkdir -p ${REMOTE_PATH}"
+# 1. Pull latest
+echo ""
+echo "[1/4] git pull..."
+cd "$PROJECT_DIR"
+git pull
 
-# Transfer all files
-cd "$(dirname "$0")/.."
-scp -r config/ src/ scripts/ requirements.txt README.md ${REMOTE_USER}@${SERVER_IP}:${REMOTE_PATH}/
+# 2. Build React frontend (skip if directory missing)
+if [ -d "$UI_DIR" ]; then
+    echo ""
+    echo "[2/4] Building React frontend..."
+    cd "$UI_DIR"
+    npm install --silent
+    npm run build
+    echo "      Frontend built -> $UI_DIR/dist"
+else
+    echo "[2/4] No 'Nueva UI' directory — skipping frontend build."
+fi
+
+cd "$PROJECT_DIR"
+
+# 3. Ensure log directory exists
+mkdir -p "$LOG_DIR"
+
+# 4. Restart or start systemd service
+echo ""
+echo "[3/4] Restarting backend service..."
+if systemctl list-unit-files pucp-orchestrator.service &>/dev/null; then
+    sudo systemctl restart pucp-orchestrator
+    echo "      pucp-orchestrator restarted."
+else
+    echo "      Service not installed. Run:  bash scripts/setup-service.sh"
+    exit 1
+fi
+
+# 5. Show live status
+echo ""
+echo "[4/4] Status:"
+sudo systemctl status pucp-orchestrator --no-pager -l | head -25
 
 echo ""
-echo "Files transferred. Now SSH into server and run:"
-echo "  ssh ${REMOTE_USER}@${SERVER_IP}"
-echo "  cd ${REMOTE_PATH}"
-echo "  bash scripts/install.sh"
+echo "=== Done. App at http://$(hostname -I | awk '{print $1}'):8080 ==="
