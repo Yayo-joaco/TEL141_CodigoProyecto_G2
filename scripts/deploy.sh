@@ -24,6 +24,14 @@ git pull
 if [ -d "$UI_DIR" ]; then
     echo ""
     echo "[2/4] Building React frontend..."
+    # Load nvm if available (needed for Node 18+)
+    export NVM_DIR="$HOME/.nvm"
+    [ -s "$NVM_DIR/nvm.sh" ] && source "$NVM_DIR/nvm.sh"
+    # Use Node 20 if nvm is available, otherwise use system node
+    if command -v nvm &>/dev/null; then
+        nvm use 20 2>/dev/null || nvm use default 2>/dev/null || true
+    fi
+    echo "      Node: $(node --version), npm: $(npm --version)"
     cd "$UI_DIR"
     npm install --silent
     npm run build

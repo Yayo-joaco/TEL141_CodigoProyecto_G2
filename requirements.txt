@@ -5,3 +5,7 @@ SQLAlchemy==2.0.30
 PyYAML==6.0.1
 PyJWT==2.8.0
 cryptography==42.0.5
+gevent==23.9.1
+gevent-websocket==0.10.1
+websocket-client==1.7.0
+requests==2.31.0
