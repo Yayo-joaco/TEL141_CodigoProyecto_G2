@@ -1115,21 +1115,47 @@ def api_list_servers():
         return err
     orch = get_orchestrator()
     hosts = orch.get_hosts_status()
-    return jsonify([{
+    result = [{
         "id": h.get("hostname", ""),
         "hostname": h.get("hostname", ""),
         "ip": h.get("ip", ""),
+        "role": h.get("role", "worker"),
         "cpuTotal": h.get("total_vcpus", 0),
         "cpuUsed": h.get("total_vcpus", 0) - h.get("available_vcpus", 0),
         "ramTotal": round(h.get("total_ram_mb", 0) / 1024),
         "ramUsed": round((h.get("total_ram_mb", 0) - h.get("available_ram_mb", 0)) / 1024),
         "diskTotal": h.get("total_disk_gb", 0),
         "diskUsed": h.get("total_disk_gb", 0) - h.get("available_disk_gb", 0),
-        "zone": h.get("zone_id", "AZ-Compute-1"),
+        "zone": "AZ-Linux-1",
         "status": "online" if h.get("is_active") else "offline",
         "vms_running": h.get("vms_running", 0),
-        "cluster": h.get("cluster", "linux"),
-    } for h in hosts])
+        "cluster": "linux",
+    } for h in hosts]
+
+    # Append OpenStack compute nodes via Nova hypervisor API
+    if orch._os_cfg and orch._os_cfg.get("auth", {}).get("password"):
+        try:
+            os_drv = orch._get_openstack_driver()
+            for hv in os_drv.get_hypervisor_stats():
+                result.append({
+                    "id": f"os-{hv['hostname']}",
+                    "hostname": hv["hostname"],
+                    "ip": hv.get("host_ip", ""),
+                    "cpuTotal": hv["total_vcpus"],
+                    "cpuUsed": hv["total_vcpus"] - hv["free_vcpus"],
+                    "ramTotal": round(hv["total_ram_mb"] / 1024),
+                    "ramUsed": round((hv["total_ram_mb"] - hv["free_ram_mb"]) / 1024),
+                    "diskTotal": hv["total_disk_gb"],
+                    "diskUsed": hv["total_disk_gb"] - hv["free_disk_gb"],
+                    "zone": "AZ-OpenStack-1",
+                    "status": "online" if hv.get("state") == "up" else "offline",
+                    "vms_running": hv.get("running_vms", 0),
+                    "cluster": "openstack",
+                })
+        except Exception as e:
+            logger.warning("OpenStack hypervisors unavailable: %s", e)
+
+    return jsonify(result)
 
 
 # =============================================================

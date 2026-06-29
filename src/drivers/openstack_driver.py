@@ -205,6 +205,7 @@ class OpenStackDriver:
         for h in r.json().get("hypervisors", []):
             result.append({
                 "hostname": h.get("hypervisor_hostname", ""),
+                "host_ip": h.get("host_ip", ""),
                 "state": h.get("state", ""),
                 "status": h.get("status", ""),
                 "total_vcpus": h.get("vcpus", 0),
@@ -213,6 +214,7 @@ class OpenStackDriver:
                 "free_ram_mb": h.get("free_ram_mb", 0),
                 "total_disk_gb": h.get("local_gb", 0),
                 "free_disk_gb": h.get("free_disk_gb", 0),
+                "running_vms": h.get("running_vms", 0),
             })
         return result
 
