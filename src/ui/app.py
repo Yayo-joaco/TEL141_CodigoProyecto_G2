@@ -169,10 +169,10 @@ def operator_or_admin_required(f):
 
 @app.route("/login", methods=["GET", "POST"])
 def login_page():
-    # If Nueva UI dist is built, let the SPA handle login
+    # SPA handles login at /auth — redirect GET requests
     index = _os.path.join(_UI_DIST, "index.html")
     if request.method == "GET" and _os.path.exists(index):
-        return send_file(index)
+        return redirect("/auth")
     if request.method == "POST":
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "").strip()
@@ -1241,6 +1241,37 @@ def api_list_sessions():
         return jsonify({"error": "forbidden"}), 403
     orch = get_orchestrator()
     return jsonify(orch.get_active_sessions(user))
+
+
+# =============================================================
+# REST API — Admin Health
+# =============================================================
+
+@app.route("/api/admin/health", methods=["GET"])
+def api_admin_health():
+    _, err = _require_api_auth()
+    if err:
+        return err
+    orch = get_orchestrator()
+
+    # Linux: use cached is_active from last refresh_hosts (no SSH needed here)
+    linux_status = "online" if any(h.is_active for h in orch.hosts) else "offline"
+
+    # OpenStack: try cached token (re-requests only if expired; fast path most of the time)
+    os_status = "offline"
+    if orch._os_cfg and orch._os_cfg.get("auth", {}).get("password"):
+        try:
+            os_drv = orch._get_openstack_driver()
+            token = os_drv._get_admin_token()
+            os_status = "online" if token else "offline"
+        except Exception:
+            os_status = "offline"
+
+    return jsonify({
+        "linux": linux_status,
+        "openstack": os_status,
+        "placement": "active",
+    })
 
 
 # =============================================================
