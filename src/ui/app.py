@@ -1294,12 +1294,11 @@ def api_upload_image():
             c.close()
             return code == 0, out, err_out
 
-        # --- OpenStack headnode (192.168.202.1): two-step Glance upload ---
-        # Step 1: create image record (metadata only, no file) via paramiko → get UUID
-        # Step 2: stream file data to Glance PUT /v2/images/{id}/file via curl on the
-        #         headnode, piped through an SSH subprocess stdin.
-        # This avoids: (a) double-read checksum issue with openstack CLI + /dev/stdin,
-        # (b) /tmp staging double-space problem, (c) gevent+paramiko stdin conflict.
+        # --- OpenStack headnode (192.168.202.1): two-step Glance REST upload ---
+        # openstack CLI without --file creates an 'active' 0-byte image when stdin is
+        # closed, which blocks the subsequent PUT with 409. Use curl for both steps:
+        # Step 1: POST /v2/images (JSON metadata) → status=queued + UUID via paramiko
+        # Step 2: PUT /v2/images/{id}/file via subprocess+ssh stdin pipe (no /tmp)
         env_str = (
             f"OS_AUTH_URL=http://controller:5000/v3 "
             f"OS_USERNAME={os_auth.get('username', 'cloud_admin')} "
@@ -1309,25 +1308,28 @@ def api_upload_image():
             f"OS_PROJECT_DOMAIN_NAME={os_auth.get('project_domain_name', os_auth.get('domain_name', 'Cloud'))} "
             f"OS_IDENTITY_API_VERSION=3 "
         )
+        import json as _json, subprocess
         try:
-            import subprocess
-            # Step 1: create queued image record, returns UUID
+            # Step 1: POST metadata to Glance → queued image record
+            safe_name = name.replace("'", "'\\''")
             create_cmd = (
-                f"{env_str}openstack image create "
-                f"--disk-format {disk_format} "
-                f"--container-format bare "
-                f"--public "
-                f"-f value -c id "
-                f'"{name}"'
+                f"TOKEN=$({env_str}openstack token issue -f value -c id) && "
+                f"curl -sf -X POST "
+                f"-H \"X-Auth-Token: $TOKEN\" "
+                f"-H \"Content-Type: application/json\" "
+                f"--data '{{\"name\":\"{safe_name}\",\"disk_format\":\"{disk_format}\","
+                f"\"container_format\":\"bare\",\"visibility\":\"public\"}}' "
+                f"http://controller:9292/v2/images"
             )
-            glance_id_raw = _os_ssh_cmd(create_cmd, timeout=30)
-            glance_id = glance_id_raw.splitlines()[0].strip()
+            create_out = _os_ssh_cmd(create_cmd, timeout=30)
+            img_meta = _json.loads(create_out)
+            glance_id = img_meta.get("id", "")
             if not glance_id or len(glance_id) < 32:
-                raise RuntimeError(f"Unexpected image create output: {glance_id_raw!r}")
-            logger.info("Glance image record created: id=%s", glance_id)
+                raise RuntimeError(f"Unexpected Glance create response: {create_out[:200]}")
+            logger.info("Glance image record created (queued): id=%s status=%s",
+                        glance_id, img_meta.get("status"))
 
-            # Step 2: stream file to Glance via curl on headnode (reads stdin, no /tmp)
-            # curl --data-binary @- reads from its stdin, which is the SSH channel stdin
+            # Step 2: stream file via ssh+curl on headnode (no /tmp staging)
             upload_cmd = (
                 f"TOKEN=$({env_str}openstack token issue -f value -c id) && "
                 f"curl -s -X PUT "
@@ -1362,7 +1364,6 @@ def api_upload_image():
                 results["openstack"] = {"ok": True, "glance_id": glance_id}
                 logger.info("Glance upload via SSH+curl succeeded: id=%s http=%s", glance_id, http_code)
             else:
-                # Clean up the queued (empty) image record
                 try:
                     _os_ssh_cmd(f"openstack image delete {glance_id}", timeout=15)
                 except Exception:
