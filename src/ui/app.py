@@ -1023,13 +1023,30 @@ def api_vm_console(slice_id, vm_id):
 # REST API — Flavors
 # =============================================================
 
+import math as _math
+
 @app.route("/api/flavors", methods=["GET"])
 def api_list_flavors():
     _, err = _require_api_auth()
     if err:
         return err
     orch = get_orchestrator()
-    return jsonify(orch.db.list_flavors())
+    flavors = orch.db.list_flavors()
+    # Check which flavors exist in Nova (best-effort)
+    nova_names = set()
+    if orch._os_cfg and orch._os_cfg.get("auth", {}).get("password"):
+        try:
+            os_drv = orch._get_openstack_driver()
+            nova_url = os_drv._nova_url
+            import requests as _req
+            r = _req.get(f"{nova_url}/v2.1/flavors", headers=os_drv._headers(), timeout=5)
+            if r.ok:
+                nova_names = {f["name"] for f in r.json().get("flavors", [])}
+        except Exception:
+            pass
+    for f in flavors:
+        f["novaSynced"] = f["name"] in nova_names if nova_names else None
+    return jsonify(flavors)
 
 
 @app.route("/api/flavors", methods=["POST"])
@@ -1042,16 +1059,70 @@ def api_create_flavor():
     data = request.get_json(force=True) or {}
     orch = get_orchestrator()
     import uuid as _uuid
-    fid = data.get("id") or data.get("name") or str(_uuid.uuid4())[:8]
+    name = (data.get("name") or "").strip()
+    fid = data.get("id") or name or str(_uuid.uuid4())[:8]
+    if not name:
+        name = fid
+    ram_gb_float = float(data.get("ramGb", 1))
+    ram_mb_val = max(128, int(ram_gb_float * 1024))
+    disk_gb_val = max(1, _math.ceil(float(data.get("diskGb", 10))))
+    vcpus_val = max(1, int(data.get("vcpus", 1)))
+
     f = orch.db.save_flavor(
-        flavor_id=fid,
-        name=data.get("name", fid),
-        vcpus=int(data.get("vcpus", 1)),
-        ram_gb=int(data.get("ramGb", 1)),
-        disk_gb=int(data.get("diskGb", 10)),
+        flavor_id=fid, name=name, vcpus=vcpus_val,
+        ram_mb=ram_mb_val, disk_gb=disk_gb_val,
         description=data.get("description", ""),
     )
+
+    # Push to OpenStack Nova
+    nova_synced = False
+    if orch._os_cfg and orch._os_cfg.get("auth", {}).get("password"):
+        try:
+            os_drv = orch._get_openstack_driver()
+            os_drv.get_or_create_flavor(name=name, vcpus=vcpus_val,
+                                        ram_mb=ram_mb_val, disk_gb=disk_gb_val)
+            nova_synced = True
+        except Exception as e:
+            logger.warning("Nova flavor sync failed: %s", e)
+
+    f["novaSynced"] = nova_synced
     return jsonify(f), 201
+
+
+@app.route("/api/flavors/<flavor_id>", methods=["PATCH"])
+def api_update_flavor(flavor_id):
+    user, err = _require_api_auth()
+    if err:
+        return err
+    if user.role.value != "admin":
+        return jsonify({"error": "Admin only"}), 403
+    data = request.get_json(force=True) or {}
+    orch = get_orchestrator()
+    existing = orch.db.get_flavor(flavor_id)
+    if not existing:
+        return jsonify({"error": "Flavor not found"}), 404
+    name = (data.get("name") or existing["name"]).strip()
+    ram_gb_float = float(data.get("ramGb", existing["ramGb"]))
+    ram_mb_val = max(128, int(ram_gb_float * 1024))
+    disk_gb_val = max(1, _math.ceil(float(data.get("diskGb", existing["diskGb"]))))
+    vcpus_val = max(1, int(data.get("vcpus", existing["vcpus"])))
+    f = orch.db.save_flavor(
+        flavor_id=flavor_id, name=name, vcpus=vcpus_val,
+        ram_mb=ram_mb_val, disk_gb=disk_gb_val,
+        description=data.get("description", existing.get("description", "")),
+    )
+    # Sync to Nova
+    nova_synced = False
+    if orch._os_cfg and orch._os_cfg.get("auth", {}).get("password"):
+        try:
+            os_drv = orch._get_openstack_driver()
+            os_drv.get_or_create_flavor(name=name, vcpus=vcpus_val,
+                                        ram_mb=ram_mb_val, disk_gb=disk_gb_val)
+            nova_synced = True
+        except Exception as e:
+            logger.warning("Nova flavor sync failed: %s", e)
+    f["novaSynced"] = nova_synced
+    return jsonify(f)
 
 
 @app.route("/api/flavors/<flavor_id>", methods=["DELETE"])
@@ -1077,11 +1148,125 @@ def api_list_images():
         return err
     orch = get_orchestrator()
     imgs = orch.list_images()
+    # Build set of image names referenced by active VMs
+    try:
+        used_names = set(orch.db.get_active_vm_image_names())
+    except Exception:
+        used_names = set()
     return jsonify([{
-        "id": i["id"], "name": i["name"], "os": i["name"],
-        "sizeGB": i.get("size_gb", 0), "uploadedAt": (i.get("created_at") or "")[:10],
-        "inUse": True, "format": i.get("format", "qcow2"), "path": i.get("path", ""),
+        "id": i["id"],
+        "name": i["name"],
+        "os": i.get("filename") or i["name"],
+        "sizeGB": round(i.get("size_gb", 0), 2),
+        "uploadedAt": (i.get("created_at") or "")[:10],
+        "inUse": i["name"] in used_names,
+        "format": i.get("format", "qcow2"),
+        "path": i.get("path", ""),
+        "uploadedBy": i.get("uploaded_by", ""),
     } for i in imgs])
+
+
+@app.route("/api/images/upload", methods=["POST"])
+def api_upload_image():
+    """Receive file, upload to OpenStack Glance + SCP to Linux server1, register in DB."""
+    user, err = _require_api_auth()
+    if err:
+        return err
+    if user.role.value != "admin":
+        return jsonify({"error": "Admin only"}), 403
+
+    if "file" not in request.files:
+        return jsonify({"error": "No file part in request"}), 400
+    f = request.files["file"]
+    if not f.filename:
+        return jsonify({"error": "Empty filename"}), 400
+
+    name = request.form.get("name", "").strip() or Path(f.filename).stem
+    description = request.form.get("description", "").strip() or name
+    disk_format = request.form.get("format", "qcow2")
+
+    tmp_dir = Path("/tmp/pucp-images")
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = tmp_dir / f"{uuid.uuid4().hex}_{f.filename}"
+    try:
+        f.save(str(tmp_path))
+        size_gb = round(tmp_path.stat().st_size / (1024 ** 3), 2) or float(request.form.get("sizeGB", 0))
+
+        orch = get_orchestrator()
+        results = {}
+        primary_path = f"/home/ubuntu/{f.filename}"
+
+        # --- OpenStack Glance upload (priority) ---
+        if orch._os_cfg and orch._os_cfg.get("auth", {}).get("password"):
+            try:
+                os_drv = orch._get_openstack_driver()
+                glance_result = os_drv.upload_image_to_glance(
+                    name=name, file_path=str(tmp_path), disk_format=disk_format,
+                )
+                results["openstack"] = {"ok": True, "glance_id": glance_result["image_id"]}
+                primary_path = f"glance://{glance_result['image_id']}"
+            except Exception as e:
+                logger.warning("Glance upload failed: %s", e)
+                results["openstack"] = {"ok": False, "error": str(e)}
+        else:
+            results["openstack"] = {"ok": False, "error": "OpenStack not configured"}
+
+        # --- Linux server1 SCP (best-effort via paramiko) ---
+        try:
+            import paramiko
+            hosts_cfg = orch._hosts_cfg if hasattr(orch, "_hosts_cfg") else {}
+            ssh_key = hosts_cfg.get("ssh", {}).get("key_path", "/home/ubuntu/.ssh/id_rsa")
+            headnode_ip = "192.168.201.1"
+            remote_path = f"/home/ubuntu/{f.filename}"
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh.connect(headnode_ip, username="ubuntu", key_filename=ssh_key, timeout=15)
+            with ssh.open_sftp() as sftp:
+                sftp.put(str(tmp_path), remote_path)
+            ssh.close()
+            results["linux"] = {"ok": True, "path": remote_path}
+        except Exception as e:
+            logger.warning("SCP to server1 failed: %s", e)
+            results["linux"] = {"ok": False, "error": str(e)}
+
+        # --- Register in DB (use glance path if available, else linux path) ---
+        img_id = orch.db.save_image(
+            name=name, filename=description, path=primary_path,
+            format=disk_format, size_gb=size_gb,
+            uploaded_by=user.email or user.username,
+        )
+        orch.db.save_log("system", "orchestrator", "INFO",
+                         f"Image '{name}' uploaded by {user.email or user.username}",
+                         user_id=user.email or user.username)
+
+        return jsonify({
+            "success": True,
+            "image_id": img_id,
+            "name": name,
+            "path": primary_path,
+            "sizeGB": size_gb,
+            "clusters": results,
+        }), 201
+    except Exception as e:
+        logger.exception("Image upload failed")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+@app.route("/api/images/<image_id>", methods=["DELETE"])
+def api_delete_image(image_id):
+    user, err = _require_api_auth()
+    if err:
+        return err
+    if user.role.value != "admin":
+        return jsonify({"error": "Admin only"}), 403
+    orch = get_orchestrator()
+    orch.db.delete_image(image_id)
+    return jsonify({"ok": True})
 
 
 @app.route("/api/images", methods=["POST"])
@@ -1093,12 +1278,16 @@ def api_create_image():
         return jsonify({"error": "Admin only"}), 403
     data = request.get_json(force=True) or {}
     orch = get_orchestrator()
+    name = data.get("name", "").strip()
+    description = data.get("description", "").strip() or name
+    if not name:
+        return jsonify({"error": "name required"}), 400
     result = orch.import_image(
-        name=data.get("name", ""),
-        filename=data.get("filename", ""),
-        path=data.get("path", ""),
+        name=name,
+        filename=description,   # reuse filename column as human-readable description
+        path=data.get("path", "").strip(),
         format=data.get("format", "qcow2"),
-        size_gb=int(data.get("sizeGB", 2)),
+        size_gb=float(data.get("sizeGB", 2)),
         uploaded_by=user.email or user.username,
     )
     return jsonify(result), 201
@@ -1126,7 +1315,7 @@ def api_list_servers():
         "ramUsed": round((h.get("total_ram_mb", 0) - h.get("available_ram_mb", 0)) / 1024),
         "diskTotal": h.get("total_disk_gb", 0),
         "diskUsed": h.get("total_disk_gb", 0) - h.get("available_disk_gb", 0),
-        "zone": "AZ-Linux-1",
+        "zone": "AZ-Compute-1",
         "status": "online" if h.get("is_active") else "offline",
         "vms_running": h.get("vms_running", 0),
         "cluster": "linux",
@@ -1168,7 +1357,41 @@ def api_list_zones():
     if err:
         return err
     orch = get_orchestrator()
-    return jsonify(orch.db.list_zones())
+    zones = {z["id"]: dict(z, cpuUsed=0, ramUsed=0, servers=0, serversOnline=0) for z in orch.db.list_zones()}
+
+    # Enrich with live Linux worker data
+    try:
+        for h in orch.get_hosts_status():
+            if h.get("role") == "headnode":
+                continue
+            zid = "AZ-Compute-1"
+            if zid in zones:
+                zones[zid]["servers"] += 1
+                zones[zid]["cpuTotal"] = max(zones[zid].get("cpuTotal", 0),
+                                             zones[zid].get("cpuTotal", 0))
+                zones[zid]["cpuUsed"] += h.get("total_vcpus", 0) - h.get("available_vcpus", 0)
+                zones[zid]["ramUsed"] += round((h.get("total_ram_mb", 0) - h.get("available_ram_mb", 0)) / 1024)
+                if h.get("is_active"):
+                    zones[zid]["serversOnline"] += 1
+    except Exception as e:
+        logger.warning("Zone Linux enrichment failed: %s", e)
+
+    # Enrich with live OpenStack hypervisor data
+    if orch._os_cfg and orch._os_cfg.get("auth", {}).get("password"):
+        try:
+            os_drv = orch._get_openstack_driver()
+            for hv in os_drv.get_hypervisor_stats():
+                zid = "AZ-OpenStack-1"
+                if zid in zones:
+                    zones[zid]["servers"] += 1
+                    zones[zid]["cpuUsed"] += hv["total_vcpus"] - hv["free_vcpus"]
+                    zones[zid]["ramUsed"] += round((hv["total_ram_mb"] - hv["free_ram_mb"]) / 1024)
+                    if hv.get("state") == "up":
+                        zones[zid]["serversOnline"] += 1
+        except Exception as e:
+            logger.warning("Zone OpenStack enrichment failed: %s", e)
+
+    return jsonify(list(zones.values()))
 
 
 # =============================================================
@@ -1196,6 +1419,26 @@ def api_list_logs():
 # REST API — Users (admin)
 # =============================================================
 
+def _count_slices_by_user(orch) -> dict:
+    """Return {username: active_slice_count} from DB."""
+    try:
+        from src.database.db_manager import SliceRecord
+        session = orch.db.Session()
+        try:
+            rows = session.query(SliceRecord.created_by).filter(
+                SliceRecord.status != "deleted"
+            ).all()
+            counts: dict = {}
+            for (uname,) in rows:
+                if uname:
+                    counts[uname] = counts.get(uname, 0) + 1
+            return counts
+        finally:
+            session.close()
+    except Exception:
+        return {}
+
+
 @app.route("/api/users", methods=["GET"])
 def api_list_users():
     user, err = _require_api_auth()
@@ -1205,6 +1448,7 @@ def api_list_users():
         return jsonify({"error": "forbidden"}), 403
     orch = get_orchestrator()
     users = orch.list_users()
+    slice_counts = _count_slices_by_user(orch)
     return jsonify([{
         "id": u.get("id", ""),
         "name": u.get("username", ""),
@@ -1212,7 +1456,7 @@ def api_list_users():
         "role": u.get("role", "user"),
         "status": "active" if u.get("is_active") else "disabled",
         "cluster_assignment": u.get("cluster_assignment", "linux"),
-        "slicesCount": 0,
+        "slicesCount": slice_counts.get(u.get("username", ""), 0),
         "createdAt": (u.get("created_at") or "")[:10],
     } for u in users])
 

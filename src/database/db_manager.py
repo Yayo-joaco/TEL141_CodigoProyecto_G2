@@ -30,17 +30,20 @@ class FlavorRecord(Base):
     id = Column(String(64), primary_key=True)
     name = Column(String(100), unique=True, nullable=False)
     vcpus = Column(Integer, default=1)
-    ram_gb = Column(Integer, default=1)
+    ram_gb = Column(Integer, default=1)   # legacy; use ram_mb for precision
+    ram_mb = Column(Integer, nullable=True)  # authoritative when set
     disk_gb = Column(Integer, default=10)
     description = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     def to_dict(self) -> dict:
+        ram_mb_val = self.ram_mb if self.ram_mb else (self.ram_gb or 1) * 1024
         return {
             "id": self.id,
             "name": self.name,
             "vcpus": self.vcpus,
-            "ramGb": self.ram_gb,
+            "ramMb": ram_mb_val,
+            "ramGb": round(ram_mb_val / 1024, 2),
             "diskGb": self.disk_gb,
             "description": self.description or "",
         }
@@ -350,6 +353,7 @@ class DatabaseManager:
             ("vms", "openstack_server_id", "VARCHAR(64)"),
             ("vms", "ip_address_external", "VARCHAR(50)"),
             ("users", "cluster_assignment", "VARCHAR(20) DEFAULT 'linux'"),
+            ("flavors", "ram_mb", "INT"),
         ]
         with self.engine.connect() as conn:
             for table, col, col_type in migrations:
@@ -618,6 +622,17 @@ class DatabaseManager:
             while vnc_port in used_vnc:
                 vnc_port += 1
             return {"vnc_port": vnc_port, "vnc_ws_port": vnc_port + 11000}
+        finally:
+            session.close()
+
+    def get_active_vm_image_names(self) -> list:
+        session = self.Session()
+        try:
+            rows = session.query(VMRecord.image).filter(
+                VMRecord.image.isnot(None),
+                VMRecord.status.in_(["running", "pending", "stopped"]),
+            ).distinct().all()
+            return [r[0] for r in rows if r[0]]
         finally:
             session.close()
 
@@ -922,7 +937,7 @@ class DatabaseManager:
                 for name, vcpus, ram_gb, disk_gb, desc in defaults:
                     session.add(FlavorRecord(
                         id=name, name=name, vcpus=vcpus,
-                        ram_gb=ram_gb, disk_gb=disk_gb, description=desc,
+                        ram_gb=ram_gb, ram_mb=ram_gb * 1024, disk_gb=disk_gb, description=desc,
                     ))
                 logger.info("Seeded default flavors")
 
@@ -966,11 +981,16 @@ class DatabaseManager:
             session.close()
 
     def save_flavor(self, flavor_id: str, name: str, vcpus: int,
-                    ram_gb: int, disk_gb: int, description: str = "") -> dict:
+                    ram_mb: int, disk_gb: int, description: str = "",
+                    ram_gb: int = None) -> dict:
         session = self.Session()
         try:
-            r = FlavorRecord(id=flavor_id, name=name, vcpus=vcpus,
-                             ram_gb=ram_gb, disk_gb=disk_gb, description=description)
+            r = FlavorRecord(
+                id=flavor_id, name=name, vcpus=vcpus,
+                ram_mb=ram_mb,
+                ram_gb=ram_gb if ram_gb is not None else max(1, ram_mb // 1024),
+                disk_gb=disk_gb, description=description,
+            )
             session.merge(r)
             session.commit()
             return r.to_dict()

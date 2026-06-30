@@ -158,7 +158,7 @@ class OpenStackDriver:
     # ------------------------------------------------------------------
 
     def list_images(self) -> List[dict]:
-        url = f"{self._glance_url}/v2/images"
+        url = f"{self._glance_url}/v2/images?limit=100"
         r = requests.get(url, headers=self._headers(), timeout=15)
         r.raise_for_status()
         return r.json().get("images", [])
@@ -168,6 +168,34 @@ class OpenStackDriver:
             if img["name"] == name:
                 return img["id"]
         return None
+
+    def upload_image_to_glance(self, name: str, file_path: str,
+                                disk_format: str = "qcow2",
+                                container_format: str = "bare",
+                                visibility: str = "public") -> dict:
+        """Create image record in Glance then upload binary data from file_path."""
+        # Step 1: create the image record
+        create_url = f"{self._glance_url}/v2/images"
+        payload = {
+            "name": name,
+            "disk_format": disk_format,
+            "container_format": container_format,
+            "visibility": visibility,
+        }
+        r = requests.post(create_url, json=payload, headers=self._headers(), timeout=30)
+        r.raise_for_status()
+        image_id = r.json()["id"]
+
+        # Step 2: upload binary data (stream so we don't load 600MB in RAM)
+        upload_url = f"{self._glance_url}/v2/images/{image_id}/file"
+        upload_headers = dict(self._headers())
+        upload_headers["Content-Type"] = "application/octet-stream"
+        with open(file_path, "rb") as fh:
+            r2 = requests.put(upload_url, data=fh, headers=upload_headers, timeout=600)
+        r2.raise_for_status()
+
+        logger.info("Uploaded image '%s' to Glance as %s", name, image_id)
+        return {"image_id": image_id, "name": name, "status": "active"}
 
     # ------------------------------------------------------------------
     # Nova — flavors
