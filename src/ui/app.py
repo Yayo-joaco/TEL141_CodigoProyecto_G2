@@ -1293,11 +1293,12 @@ def api_upload_image():
             c.close()
             return code == 0, out, err_out
 
-        # --- OpenStack headnode (192.168.202.1): SCP + openstack image create via SSH ---
-        # App server cannot reach 192.168.202.x HTTP ports directly (timeout), but SSH works.
-        remote_os = f"/tmp/{uuid.uuid4().hex}_{f.filename}"
-        # -f value -c id outputs just the UUID on success, nothing else
-        glance_cmd = (
+        # --- OpenStack headnode (192.168.202.1): stream file via SSH stdin ---
+        # We pipe the file directly to `openstack image create --file -` so the file
+        # never lands on /tmp of the headnode — avoids the double-space problem where
+        # SCP would consume 1.4 GB in /tmp and Glance would need another 1.4 GB to write
+        # the image store, exceeding the ~2.1 GB free on /dev/vda1.
+        env_str = (
             f"OS_AUTH_URL=http://controller:5000/v3 "
             f"OS_USERNAME={os_auth.get('username', 'cloud_admin')} "
             f"OS_PASSWORD={os_auth.get('password', '')} "
@@ -1305,32 +1306,49 @@ def api_upload_image():
             f"OS_USER_DOMAIN_NAME={os_auth.get('user_domain_name', os_auth.get('domain_name', 'Cloud'))} "
             f"OS_PROJECT_DOMAIN_NAME={os_auth.get('project_domain_name', os_auth.get('domain_name', 'Cloud'))} "
             f"OS_IDENTITY_API_VERSION=3 "
-            f"openstack image create "
-            f"--file {remote_os} "
+        )
+        glance_cmd = (
+            f"{env_str}openstack image create "
+            f"--file - "
             f"--disk-format {disk_format} "
             f"--container-format bare "
             f"--public "
             f"-f value -c id "
             f'"{name}"'
-            f" && rm -f {remote_os} || ( rm -f {remote_os}; exit 1 )"
         )
         try:
-            ok, out, err_out = _ssh_scp("192.168.202.1", remote_os, glance_cmd)
-            if ok:
-                # -f value -c id outputs the UUID as the first line
+            c = paramiko.SSHClient()
+            c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            c.connect("192.168.202.1", username="ubuntu", key_filename=ssh_key, timeout=30)
+            transport = c.get_transport()
+            transport.set_keepalive(30)
+            chan = transport.open_session()
+            chan.exec_command(glance_cmd)
+            # Stream file to stdin in 256 KB chunks
+            with open(str(tmp_path), "rb") as fh:
+                while True:
+                    chunk = fh.read(262144)
+                    if not chunk:
+                        break
+                    chan.sendall(chunk)
+            chan.shutdown_write()
+            exit_code = chan.recv_exit_status()
+            out = chan.recv(65536).decode("utf-8", errors="replace").strip()
+            err_out = chan.recv_stderr(65536).decode("utf-8", errors="replace").strip()
+            c.close()
+            if exit_code == 0:
                 glance_id = out.splitlines()[0].strip() if out else None
-                # validate it looks like a UUID (basic check)
                 if not glance_id or len(glance_id) < 32:
                     glance_id = None
                 primary_path = f"glance://{glance_id}" if glance_id else f"glance://{name}"
                 results["openstack"] = {"ok": True, "glance_id": glance_id or name}
-                logger.info("Glance upload via SSH succeeded: id=%s", glance_id)
+                logger.info("Glance upload via SSH stdin succeeded: id=%s", glance_id)
             else:
                 msg = (err_out or out or "unknown error")[:300]
-                logger.warning("Glance upload via SSH failed: %s", msg)
+                logger.warning("Glance upload via SSH stdin failed: %s", msg)
                 results["openstack"] = {"ok": False, "error": msg}
         except Exception as e:
-            logger.warning("Glance upload via SSH exception: %s", e)
+            logger.warning("Glance upload via SSH stdin exception: %s", e)
             results["openstack"] = {"ok": False, "error": str(e)[:300]}
 
         # --- Linux headnode (192.168.201.1): SCP only ---
