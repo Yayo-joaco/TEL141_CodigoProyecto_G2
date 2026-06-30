@@ -1317,24 +1317,26 @@ def api_upload_image():
             f'"{name}"'
         )
         try:
-            c = paramiko.SSHClient()
-            c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            c.connect("192.168.202.1", username="ubuntu", key_filename=ssh_key, timeout=30)
-            c.get_transport().set_keepalive(30)
-            stdin_ch, stdout_ch, stderr_ch = c.exec_command(glance_cmd)
-            stdin_ch.channel.settimeout(None)
-            # Stream file to stdin in 1 MB chunks — no /tmp staging on headnode
+            import subprocess
+            # Use system ssh binary to pipe file directly to openstack image create --file -
+            # Paramiko stdin streaming conflicts with gevent monkey-patching; subprocess avoids this.
+            ssh_cmd = [
+                "ssh", "-i", ssh_key,
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "BatchMode=yes",
+                "-o", "ServerAliveInterval=30",
+                "ubuntu@192.168.202.1",
+                glance_cmd,
+            ]
             with open(str(tmp_path), "rb") as fh:
-                while True:
-                    chunk = fh.read(1048576)
-                    if not chunk:
-                        break
-                    stdin_ch.write(chunk)
-            stdin_ch.channel.shutdown_write()
-            exit_code = stdout_ch.channel.recv_exit_status()
-            out = stdout_ch.read().decode("utf-8", errors="replace").strip()
-            err_out = stderr_ch.read().decode("utf-8", errors="replace").strip()
-            c.close()
+                proc = subprocess.Popen(
+                    ssh_cmd, stdin=fh,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+                out_bytes, err_bytes = proc.communicate(timeout=600)
+            exit_code = proc.returncode
+            out = out_bytes.decode("utf-8", errors="replace").strip()
+            err_out = err_bytes.decode("utf-8", errors="replace").strip()
             if exit_code == 0:
                 glance_id = out.splitlines()[0].strip() if out else None
                 if not glance_id or len(glance_id) < 32:
@@ -1344,7 +1346,7 @@ def api_upload_image():
                 logger.info("Glance upload via SSH stdin succeeded: id=%s", glance_id)
             else:
                 msg = (err_out or out or "unknown error")[:300]
-                logger.warning("Glance upload via SSH stdin failed: %s", msg)
+                logger.warning("Glance upload via SSH stdin failed (exit %d): %s", exit_code, msg)
                 results["openstack"] = {"ok": False, "error": msg}
         except Exception as e:
             logger.warning("Glance upload via SSH stdin exception: %s", e)
