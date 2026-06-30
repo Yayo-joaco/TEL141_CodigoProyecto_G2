@@ -87,7 +87,8 @@ def _os_ssh_cmd(cmd: str, timeout: int = 30) -> str:
     c = paramiko.SSHClient()
     c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     c.connect("192.168.202.1", username="ubuntu", key_filename=ssh_key, timeout=10)
-    _, so, se = c.exec_command(f"{env}{cmd}", timeout=timeout)
+    si, so, se = c.exec_command(f"{env}{cmd}", timeout=timeout)
+    si.close()  # close stdin so commands that read stdin don't block
     code = so.channel.recv_exit_status()
     out = so.read().decode("utf-8", errors="replace").strip()
     c.close()
