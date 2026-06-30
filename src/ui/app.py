@@ -63,8 +63,77 @@ def load_configs():
 
 _orchestrator = None
 
+# Cache for SSH-based OpenStack data (avoids repeated SSH calls on every request)
+_os_ssh_cache: dict = {}
+_os_ssh_cache_ttl: float = 0
 
-def get_orchestrator():
+
+def _os_ssh_cmd(cmd: str, timeout: int = 30) -> str:
+    """Run an openstack CLI command on the controller via SSH. Returns stdout or raises."""
+    orch = get_orchestrator()
+    hosts_cfg = orch._hosts_cfg if hasattr(orch, "_hosts_cfg") else {}
+    ssh_key = hosts_cfg.get("ssh", {}).get("key_path", "/home/ubuntu/.ssh/id_rsa")
+    os_auth = (orch._os_cfg or {}).get("auth", {})
+    env = (
+        f"OS_AUTH_URL=http://controller:5000/v3 "
+        f"OS_USERNAME={os_auth.get('username', 'cloud_admin')} "
+        f"OS_PASSWORD={os_auth.get('password', '')} "
+        f"OS_PROJECT_NAME={os_auth.get('project_name', 'cloud_admin')} "
+        f"OS_USER_DOMAIN_NAME={os_auth.get('user_domain_name', os_auth.get('domain_name', 'Cloud'))} "
+        f"OS_PROJECT_DOMAIN_NAME={os_auth.get('project_domain_name', os_auth.get('domain_name', 'Cloud'))} "
+        f"OS_IDENTITY_API_VERSION=3 "
+    )
+    import paramiko
+    c = paramiko.SSHClient()
+    c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    c.connect("192.168.202.1", username="ubuntu", key_filename=ssh_key, timeout=10)
+    _, so, se = c.exec_command(f"{env}{cmd}", timeout=timeout)
+    code = so.channel.recv_exit_status()
+    out = so.read().decode("utf-8", errors="replace").strip()
+    c.close()
+    if code != 0:
+        raise RuntimeError(se.read().decode("utf-8", errors="replace").strip() or f"exit {code}")
+    return out
+
+
+def _get_os_hypervisors() -> list:
+    """Return hypervisor list via SSH, cached for 60s."""
+    import time, json as _json
+    global _os_ssh_cache, _os_ssh_cache_ttl
+    now = time.time()
+    if now < _os_ssh_cache_ttl and "hypervisors" in _os_ssh_cache:
+        return _os_ssh_cache["hypervisors"]
+    try:
+        out = _os_ssh_cmd("openstack hypervisor list --long -f json")
+        data = _json.loads(out)
+        _os_ssh_cache["hypervisors"] = data
+        _os_ssh_cache_ttl = now + 60
+        return data
+    except Exception as e:
+        logger.warning("OpenStack hypervisors via SSH failed: %s", e)
+        return _os_ssh_cache.get("hypervisors", [])
+
+
+def _get_os_flavors() -> list:
+    """Return Nova flavor list via SSH, cached for 120s."""
+    import time, json as _json
+    global _os_ssh_cache, _os_ssh_cache_ttl
+    now = time.time()
+    cache_key = "flavors"
+    cached_at = _os_ssh_cache.get("flavors_ts", 0)
+    if now - cached_at < 120 and cache_key in _os_ssh_cache:
+        return _os_ssh_cache[cache_key]
+    try:
+        out = _os_ssh_cmd("openstack flavor list -f json")
+        data = _json.loads(out)
+        _os_ssh_cache[cache_key] = data
+        _os_ssh_cache["flavors_ts"] = now
+        return data
+    except Exception as e:
+        logger.warning("OpenStack flavors via SSH failed: %s", e)
+        return _os_ssh_cache.get(cache_key, [])
+
+
     global _orchestrator
     if _orchestrator is None:
         hosts_cfg, db_cfg, net_cfg, os_cfg = load_configs()
@@ -1032,16 +1101,11 @@ def api_list_flavors():
         return err
     orch = get_orchestrator()
     flavors = orch.db.list_flavors()
-    # Check which flavors exist in Nova (best-effort)
+    # Check which flavors exist in Nova via SSH (best-effort, cached 120s)
     nova_names = set()
     if orch._os_cfg and orch._os_cfg.get("auth", {}).get("password"):
         try:
-            os_drv = orch._get_openstack_driver()
-            nova_url = os_drv._nova_url
-            import requests as _req
-            r = _req.get(f"{nova_url}/v2.1/flavors", headers=os_drv._headers(), timeout=5)
-            if r.ok:
-                nova_names = {f["name"] for f in r.json().get("flavors", [])}
+            nova_names = {f.get("Name", f.get("name", "")) for f in _get_os_flavors()}
         except Exception:
             pass
     for f in flavors:
@@ -1074,13 +1138,16 @@ def api_create_flavor():
         description=data.get("description", ""),
     )
 
-    # Push to OpenStack Nova
+    # Push to OpenStack Nova via SSH
     nova_synced = False
     if orch._os_cfg and orch._os_cfg.get("auth", {}).get("password"):
         try:
-            os_drv = orch._get_openstack_driver()
-            os_drv.get_or_create_flavor(name=name, vcpus=vcpus_val,
-                                        ram_mb=ram_mb_val, disk_gb=disk_gb_val)
+            _os_ssh_cmd(
+                f"openstack flavor create --vcpus {vcpus_val} --ram {ram_mb_val} "
+                f"--disk {disk_gb_val} --public {name} 2>/dev/null || "
+                f"echo 'already exists'"
+            )
+            _os_ssh_cache.pop("flavors", None)  # invalidate cache
             nova_synced = True
         except Exception as e:
             logger.warning("Nova flavor sync failed: %s", e)
@@ -1111,13 +1178,16 @@ def api_update_flavor(flavor_id):
         ram_mb=ram_mb_val, disk_gb=disk_gb_val,
         description=data.get("description", existing.get("description", "")),
     )
-    # Sync to Nova
+    # Sync to Nova via SSH
     nova_synced = False
     if orch._os_cfg and orch._os_cfg.get("auth", {}).get("password"):
         try:
-            os_drv = orch._get_openstack_driver()
-            os_drv.get_or_create_flavor(name=name, vcpus=vcpus_val,
-                                        ram_mb=ram_mb_val, disk_gb=disk_gb_val)
+            _os_ssh_cmd(
+                f"openstack flavor create --vcpus {vcpus_val} --ram {ram_mb_val} "
+                f"--disk {disk_gb_val} --public {name} 2>/dev/null || "
+                f"echo 'already exists'"
+            )
+            _os_ssh_cache.pop("flavors", None)  # invalidate cache
             nova_synced = True
         except Exception as e:
             logger.warning("Nova flavor sync failed: %s", e)
@@ -1364,24 +1434,30 @@ def api_list_servers():
         "cluster": "linux",
     } for h in hosts]
 
-    # Append OpenStack compute nodes via Nova hypervisor API
+    # Append OpenStack compute nodes via SSH
     if orch._os_cfg and orch._os_cfg.get("auth", {}).get("password"):
         try:
-            os_drv = orch._get_openstack_driver()
-            for hv in os_drv.get_hypervisor_stats():
+            for hv in _get_os_hypervisors():
+                vcpus_total = hv.get("vCPUs", hv.get("vcpus", 0))
+                vcpus_used = hv.get("Running VMs", hv.get("running_vms", 0))
+                ram_total = hv.get("Memory MB", hv.get("memory_mb", 0))
+                ram_free = hv.get("Free RAM MB", hv.get("free_ram_mb", ram_total))
+                disk_total = hv.get("Local Storage GB", hv.get("local_gb", 0))
+                disk_free = hv.get("Free Disk GB", hv.get("free_disk_gb", disk_total))
+                state = str(hv.get("State", hv.get("state", "up"))).lower()
                 result.append({
-                    "id": f"os-{hv['hostname']}",
-                    "hostname": hv["hostname"],
-                    "ip": hv.get("host_ip", ""),
-                    "cpuTotal": hv["total_vcpus"],
-                    "cpuUsed": hv["total_vcpus"] - hv["free_vcpus"],
-                    "ramTotal": round(hv["total_ram_mb"] / 1024),
-                    "ramUsed": round((hv["total_ram_mb"] - hv["free_ram_mb"]) / 1024),
-                    "diskTotal": hv["total_disk_gb"],
-                    "diskUsed": hv["total_disk_gb"] - hv["free_disk_gb"],
+                    "id": f"os-{hv.get('Hypervisor Hostname', hv.get('hypervisor_hostname', ''))}",
+                    "hostname": hv.get("Hypervisor Hostname", hv.get("hypervisor_hostname", "")),
+                    "ip": hv.get("Host IP", hv.get("host_ip", "")),
+                    "cpuTotal": vcpus_total,
+                    "cpuUsed": vcpus_used,
+                    "ramTotal": round(ram_total / 1024),
+                    "ramUsed": round((ram_total - ram_free) / 1024),
+                    "diskTotal": disk_total,
+                    "diskUsed": disk_total - disk_free,
                     "zone": "AZ-OpenStack-1",
-                    "status": "online" if hv.get("state") == "up" else "offline",
-                    "vms_running": hv.get("running_vms", 0),
+                    "status": "online" if state in ("up", "enabled") else "offline",
+                    "vms_running": hv.get("Running VMs", hv.get("running_vms", 0)),
                     "cluster": "openstack",
                 })
         except Exception as e:
@@ -1419,17 +1495,23 @@ def api_list_zones():
     except Exception as e:
         logger.warning("Zone Linux enrichment failed: %s", e)
 
-    # Enrich with live OpenStack hypervisor data
+    # Enrich with live OpenStack hypervisor data via SSH
     if orch._os_cfg and orch._os_cfg.get("auth", {}).get("password"):
         try:
-            os_drv = orch._get_openstack_driver()
-            for hv in os_drv.get_hypervisor_stats():
+            for hv in _get_os_hypervisors():
                 zid = "AZ-OpenStack-1"
                 if zid in zones:
                     zones[zid]["servers"] += 1
-                    zones[zid]["cpuUsed"] += hv["total_vcpus"] - hv["free_vcpus"]
-                    zones[zid]["ramUsed"] += round((hv["total_ram_mb"] - hv["free_ram_mb"]) / 1024)
-                    if hv.get("state") == "up":
+                    vcpus_used = hv.get("Running VMs", hv.get("running_vms", 0))
+                    vcpus_total = hv.get("vCPUs", hv.get("vcpus", 0))
+                    ram_total = hv.get("Memory MB", hv.get("memory_mb", 0))
+                    ram_free = hv.get("Free RAM MB", hv.get("free_ram_mb", ram_total))
+                    zones[zid]["cpuTotal"] += vcpus_total
+                    zones[zid]["cpuUsed"] += vcpus_used
+                    zones[zid]["ramTotal"] += round(ram_total / 1024)
+                    zones[zid]["ramUsed"] += round((ram_total - ram_free) / 1024)
+                    state = hv.get("State", hv.get("state", "up"))
+                    if str(state).lower() in ("up", "enabled"):
                         zones[zid]["serversOnline"] += 1
         except Exception as e:
             logger.warning("Zone OpenStack enrichment failed: %s", e)
