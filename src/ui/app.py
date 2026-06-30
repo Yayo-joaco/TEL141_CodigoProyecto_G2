@@ -1221,6 +1221,7 @@ def api_upload_image():
         # --- OpenStack headnode (192.168.202.1): SCP + openstack image create via SSH ---
         # App server cannot reach 192.168.202.x HTTP ports directly (timeout), but SSH works.
         remote_os = f"/tmp/{uuid.uuid4().hex}_{f.filename}"
+        # -f value -c id outputs just the UUID on success, nothing else
         glance_cmd = (
             f"OS_AUTH_URL=http://controller:5000/v3 "
             f"OS_USERNAME={os_auth.get('username', 'cloud_admin')} "
@@ -1234,20 +1235,20 @@ def api_upload_image():
             f"--disk-format {disk_format} "
             f"--container-format bare "
             f"--public "
-            f'"{name}"; '
-            f"rm -f {remote_os}"
+            f"-f value -c id "
+            f'"{name}"'
+            f" && rm -f {remote_os} || ( rm -f {remote_os}; exit 1 )"
         )
         try:
             ok, out, err_out = _ssh_scp("192.168.202.1", remote_os, glance_cmd)
             if ok:
-                glance_id = None
-                for line in out.splitlines():
-                    cols = [c.strip() for c in line.split("|") if c.strip()]
-                    if len(cols) >= 2 and cols[0].lower() == "id":
-                        glance_id = cols[1]
-                        break
+                # -f value -c id outputs the UUID as the first line
+                glance_id = out.splitlines()[0].strip() if out else None
+                # validate it looks like a UUID (basic check)
+                if not glance_id or len(glance_id) < 32:
+                    glance_id = None
                 primary_path = f"glance://{glance_id}" if glance_id else f"glance://{name}"
-                results["openstack"] = {"ok": True, "glance_id": glance_id or "unknown"}
+                results["openstack"] = {"ok": True, "glance_id": glance_id or name}
                 logger.info("Glance upload via SSH succeeded: id=%s", glance_id)
             else:
                 msg = (err_out or out or "unknown error")[:300]
