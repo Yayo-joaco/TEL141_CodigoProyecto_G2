@@ -98,21 +98,30 @@ def _os_ssh_cmd(cmd: str, timeout: int = 30) -> str:
 
 
 def _get_os_hypervisors() -> list:
-    """Return hypervisor list via SSH, cached 60s on success, 20s on failure."""
+    """Return hypervisor list with disk details via SSH, cached 60s on success, 20s on failure.
+    'hypervisor list --long' omits local_gb/local_gb_used, so we use 'hypervisor show' per node."""
     import time, json as _json
     global _os_ssh_cache, _os_ssh_cache_ttl
     now = time.time()
     if now < _os_ssh_cache_ttl and "hypervisors" in _os_ssh_cache:
         return _os_ssh_cache["hypervisors"]
     try:
-        out = _os_ssh_cmd("openstack hypervisor list --long -f json")
-        data = _json.loads(out)
+        # Get IDs first, then show each to get local_gb/local_gb_used
+        ids_out = _os_ssh_cmd("openstack hypervisor list -f value -c ID", timeout=15)
+        ids = [i.strip() for i in ids_out.splitlines() if i.strip().isdigit()]
+        data = []
+        for hv_id in ids:
+            try:
+                hv_out = _os_ssh_cmd(f"openstack hypervisor show {hv_id} -f json", timeout=15)
+                data.append(_json.loads(hv_out))
+            except Exception:
+                pass
         _os_ssh_cache["hypervisors"] = data
         _os_ssh_cache_ttl = now + 60
         return data
     except Exception as e:
         logger.warning("OpenStack hypervisors via SSH failed: %s", e)
-        _os_ssh_cache_ttl = now + 20  # retry cooldown — don't hammer on every request
+        _os_ssh_cache_ttl = now + 20
         return _os_ssh_cache.get("hypervisors", [])
 
 
