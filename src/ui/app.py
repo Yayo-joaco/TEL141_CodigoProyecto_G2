@@ -1309,7 +1309,7 @@ def api_upload_image():
         )
         glance_cmd = (
             f"{env_str}openstack image create "
-            f"--file - "
+            f"--file /dev/stdin "
             f"--disk-format {disk_format} "
             f"--container-format bare "
             f"--public "
