@@ -1196,38 +1196,76 @@ def api_upload_image():
         results = {}
         primary_path = f"/home/ubuntu/{f.filename}"
 
-        # --- OpenStack Glance upload (priority) ---
-        if orch._os_cfg and orch._os_cfg.get("auth", {}).get("password"):
-            try:
-                os_drv = orch._get_openstack_driver()
-                glance_result = os_drv.upload_image_to_glance(
-                    name=name, file_path=str(tmp_path), disk_format=disk_format,
-                )
-                results["openstack"] = {"ok": True, "glance_id": glance_result["image_id"]}
-                primary_path = f"glance://{glance_result['image_id']}"
-            except Exception as e:
-                logger.warning("Glance upload failed: %s", e)
-                results["openstack"] = {"ok": False, "error": str(e)}
-        else:
-            results["openstack"] = {"ok": False, "error": "OpenStack not configured"}
+        hosts_cfg = orch._hosts_cfg if hasattr(orch, "_hosts_cfg") else {}
+        ssh_key = hosts_cfg.get("ssh", {}).get("key_path", "/home/ubuntu/.ssh/id_rsa")
+        os_auth = (orch._os_cfg or {}).get("auth", {})
 
-        # --- Linux server1 SCP (best-effort via paramiko) ---
-        try:
-            import paramiko
-            hosts_cfg = orch._hosts_cfg if hasattr(orch, "_hosts_cfg") else {}
-            ssh_key = hosts_cfg.get("ssh", {}).get("key_path", "/home/ubuntu/.ssh/id_rsa")
-            headnode_ip = "192.168.201.1"
-            remote_path = f"/home/ubuntu/{f.filename}"
-            ssh = paramiko.SSHClient()
-            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            ssh.connect(headnode_ip, username="ubuntu", key_filename=ssh_key, timeout=15)
-            with ssh.open_sftp() as sftp:
+        import paramiko
+
+        def _ssh_scp(host_ip, remote_path, cmd=None):
+            """SCP tmp_path to host:remote_path, then optionally run cmd."""
+            c = paramiko.SSHClient()
+            c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            c.connect(host_ip, username="ubuntu", key_filename=ssh_key, timeout=20)
+            with c.open_sftp() as sftp:
                 sftp.put(str(tmp_path), remote_path)
-            ssh.close()
-            results["linux"] = {"ok": True, "path": remote_path}
+            out, err_out, code = "", "", 0
+            if cmd:
+                _, so, se = c.exec_command(cmd, timeout=600)
+                code = so.channel.recv_exit_status()
+                out = so.read().decode("utf-8", errors="replace").strip()
+                err_out = se.read().decode("utf-8", errors="replace").strip()
+            c.close()
+            return code == 0, out, err_out
+
+        # --- OpenStack headnode (192.168.202.1): SCP + openstack image create via SSH ---
+        # App server cannot reach 192.168.202.x HTTP ports directly (timeout), but SSH works.
+        remote_os = f"/tmp/{uuid.uuid4().hex}_{f.filename}"
+        glance_cmd = (
+            f"OS_AUTH_URL=http://controller:5000/v3 "
+            f"OS_USERNAME={os_auth.get('username', 'cloud_admin')} "
+            f"OS_PASSWORD={os_auth.get('password', '')} "
+            f"OS_PROJECT_NAME={os_auth.get('project_name', 'cloud_admin')} "
+            f"OS_USER_DOMAIN_NAME={os_auth.get('user_domain_name', os_auth.get('domain_name', 'Cloud'))} "
+            f"OS_PROJECT_DOMAIN_NAME={os_auth.get('project_domain_name', os_auth.get('domain_name', 'Cloud'))} "
+            f"OS_IDENTITY_API_VERSION=3 "
+            f"openstack image create "
+            f"--file {remote_os} "
+            f"--disk-format {disk_format} "
+            f"--container-format bare "
+            f"--public "
+            f'"{name}"; '
+            f"rm -f {remote_os}"
+        )
+        try:
+            ok, out, err_out = _ssh_scp("192.168.202.1", remote_os, glance_cmd)
+            if ok:
+                glance_id = None
+                for line in out.splitlines():
+                    cols = [c.strip() for c in line.split("|") if c.strip()]
+                    if len(cols) >= 2 and cols[0].lower() == "id":
+                        glance_id = cols[1]
+                        break
+                primary_path = f"glance://{glance_id}" if glance_id else f"glance://{name}"
+                results["openstack"] = {"ok": True, "glance_id": glance_id or "unknown"}
+                logger.info("Glance upload via SSH succeeded: id=%s", glance_id)
+            else:
+                msg = (err_out or out or "unknown error")[:300]
+                logger.warning("Glance upload via SSH failed: %s", msg)
+                results["openstack"] = {"ok": False, "error": msg}
         except Exception as e:
-            logger.warning("SCP to server1 failed: %s", e)
-            results["linux"] = {"ok": False, "error": str(e)}
+            logger.warning("Glance upload via SSH exception: %s", e)
+            results["openstack"] = {"ok": False, "error": str(e)[:300]}
+
+        # --- Linux headnode (192.168.201.1): SCP only ---
+        remote_linux = f"/home/ubuntu/{f.filename}"
+        try:
+            _ssh_scp("192.168.201.1", remote_linux)
+            results["linux"] = {"ok": True, "path": remote_linux}
+            logger.info("SCP to Linux server1 succeeded: %s", remote_linux)
+        except Exception as e:
+            logger.warning("SCP to Linux server1 failed: %s", e)
+            results["linux"] = {"ok": False, "error": str(e)[:200]}
 
         # --- Register in DB (use glance path if available, else linux path) ---
         img_id = orch.db.save_image(
