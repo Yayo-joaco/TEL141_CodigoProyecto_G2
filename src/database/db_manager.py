@@ -8,7 +8,7 @@ import logging
 from datetime import datetime
 from typing import List, Optional
 
-from sqlalchemy import create_engine, Column, String, Integer, Float, Text, DateTime
+from sqlalchemy import create_engine, Column, String, Integer, Float, Text, DateTime, func
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.ext.declarative import declarative_base
 
@@ -718,25 +718,30 @@ class DatabaseManager:
                                used_ram_mb: int = 0, used_disk_gb: int = 0):
         session = self.get_session()
         try:
+            # Compute allocated resources from active VMs — these are what the
+            # placement engine tracks, not system-level CPU% or free -m output.
+            allocated = session.query(
+                func.coalesce(func.sum(VMRecord.vcpus), 0),
+                func.coalesce(func.sum(VMRecord.ram_mb), 0),
+            ).filter(VMRecord.host_ip == host_ip, VMRecord.status == "active").one()
+            alloc_vcpus = int(allocated[0])
+            alloc_ram_mb = int(allocated[1])
+
             record = session.query(HostRecord).filter_by(hostname=hostname).first()
             if record:
-                record.available_vcpus = max(0, total_vcpus - int(
-                    cpu_usage_pct / 100.0 * total_vcpus
-                ))
                 record.total_vcpus = total_vcpus
                 record.total_ram_mb = total_ram_mb
                 record.total_disk_gb = total_disk_gb
-                record.available_ram_mb = max(0, total_ram_mb - used_ram_mb)
+                record.available_vcpus = max(0, total_vcpus - alloc_vcpus)
+                record.available_ram_mb = max(0, total_ram_mb - alloc_ram_mb)
                 record.available_disk_gb = max(0, total_disk_gb - used_disk_gb)
             else:
                 record = HostRecord(
                     hostname=hostname, ip=host_ip,
                     total_vcpus=total_vcpus, total_ram_mb=total_ram_mb,
                     total_disk_gb=total_disk_gb,
-                    available_vcpus=max(0, total_vcpus - int(
-                        cpu_usage_pct / 100.0 * total_vcpus
-                    )),
-                    available_ram_mb=max(0, total_ram_mb - used_ram_mb),
+                    available_vcpus=max(0, total_vcpus - alloc_vcpus),
+                    available_ram_mb=max(0, total_ram_mb - alloc_ram_mb),
                     available_disk_gb=max(0, total_disk_gb - used_disk_gb),
                     is_active=1,
                 )

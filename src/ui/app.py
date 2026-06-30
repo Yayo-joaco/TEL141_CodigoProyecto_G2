@@ -903,7 +903,8 @@ def api_login():
     if not identifier or not password:
         return jsonify({"error": "email/username y password requeridos"}), 400
     orch = get_orchestrator()
-    success, result = orch.login(identifier, password)
+    client_ip = request.headers.get("X-Forwarded-For", request.remote_addr or "")
+    success, result = orch.login(identifier, password, ip=client_ip)
     if not success:
         return jsonify({"error": "Credenciales inválidas"}), 401
     return jsonify({
@@ -1076,9 +1077,10 @@ def api_vm_console(slice_id, vm_id):
     # For OpenStack VMs, delegate to OpenStack driver
     if getattr(vm, "openstack_server_id", None):
         try:
-            from ..drivers.openstack_driver import OpenStackDriver
             os_driver = orch._get_openstack_driver()
-            url = os_driver.get_console_url(vm.openstack_server_id)
+            slice_obj = orch.db.get_slice(slice_id)
+            project_id = getattr(slice_obj, "openstack_project_id", None) if slice_obj else None
+            url = os_driver.get_console_url(vm.openstack_server_id, project_id=project_id)
             return jsonify({"url": url, "type": "novnc"})
         except Exception as e:
             return jsonify({"error": str(e)}), 500
@@ -1467,11 +1469,11 @@ def api_list_servers():
         "ip": h.get("ip", ""),
         "role": h.get("role", "worker"),
         "cpuTotal": h.get("total_vcpus", 0),
-        "cpuUsed": h.get("total_vcpus", 0) - h.get("available_vcpus", 0),
+        "cpuUsed": max(0, h.get("total_vcpus", 0) - h.get("available_vcpus", 0)),
         "ramTotal": round(h.get("total_ram_mb", 0) / 1024),
-        "ramUsed": round((h.get("total_ram_mb", 0) - h.get("available_ram_mb", 0)) / 1024),
+        "ramUsed": max(0, round((h.get("total_ram_mb", 0) - h.get("available_ram_mb", 0)) / 1024)),
         "diskTotal": h.get("total_disk_gb", 0),
-        "diskUsed": h.get("total_disk_gb", 0) - h.get("available_disk_gb", 0),
+        "diskUsed": max(0, h.get("total_disk_gb", 0) - h.get("available_disk_gb", 0)),
         "zone": "AZ-Compute-1",
         "status": "online" if h.get("is_active") else "offline",
         "vms_running": h.get("vms_running", 0),

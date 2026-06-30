@@ -84,8 +84,8 @@ class Orchestrator:
 
     # ---- Authentication ----
 
-    def login(self, username: str, password: str) -> Tuple[bool, Optional[dict]]:
-        return self.auth.authenticate(username, password)
+    def login(self, username: str, password: str, ip: str = "") -> Tuple[bool, Optional[dict]]:
+        return self.auth.authenticate(username, password, ip=ip)
 
     def register(self, username: str, password: str,
                  role: Role = Role.USER, email: str = None,

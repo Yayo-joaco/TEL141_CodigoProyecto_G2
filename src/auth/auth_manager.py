@@ -47,7 +47,7 @@ class AuthManager:
     def verify_password(self, password: str, password_hash: str) -> bool:
         return self.hash_password(password) == password_hash
 
-    def authenticate(self, username_or_email: str, password: str) -> Tuple[bool, Optional[dict]]:
+    def authenticate(self, username_or_email: str, password: str, ip: str = "") -> Tuple[bool, Optional[dict]]:
         # Accept both email and username
         if "@" in username_or_email:
             user = self.db.get_user_by_email(username_or_email)
@@ -68,7 +68,7 @@ class AuthManager:
             "login_at": time.time(),
             "user": user.username,
             "role": user.role.value,
-            "ip": "",
+            "ip": ip,
         }
         logger.info("User '%s' authenticated (role=%s)", user.username, user.role.value)
 
