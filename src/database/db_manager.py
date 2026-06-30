@@ -362,6 +362,15 @@ class DatabaseManager:
                     logger.info("Migrated: added column %s.%s", table, col)
                 except Exception:
                     pass  # column already exists
+            # Ensure admin/operator accounts have cluster_assignment=both
+            try:
+                conn.execute(text(
+                    "UPDATE users SET cluster_assignment='both' "
+                    "WHERE role IN ('admin','operator') AND (cluster_assignment IS NULL OR cluster_assignment='linux')"
+                ))
+                conn.commit()
+            except Exception:
+                pass
 
     def _populate_vlan_pool(self):
         """Ensure VLAN pool has data (100 VLANs: 300-399)."""
@@ -401,6 +410,7 @@ class DatabaseManager:
                 password_hash=user.password_hash,
                 role=user.role.value,
                 email=user.email,
+                cluster_assignment=getattr(user, "cluster_assignment", "linux"),
                 is_active=int(user.is_active),
                 max_vcpus=user.max_vcpus,
                 max_ram_mb=user.max_ram_mb,
@@ -443,7 +453,7 @@ class DatabaseManager:
         try:
             record = session.query(UserRecord).filter_by(id=user_id).first()
             if record:
-                record.is_active = 0
+                session.delete(record)
                 session.commit()
         except Exception as e:
             session.rollback()
