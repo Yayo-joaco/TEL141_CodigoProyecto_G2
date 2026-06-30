@@ -1293,11 +1293,12 @@ def api_upload_image():
             c.close()
             return code == 0, out, err_out
 
-        # --- OpenStack headnode (192.168.202.1): stream file via SSH stdin ---
-        # We pipe the file directly to `openstack image create --file -` so the file
-        # never lands on /tmp of the headnode — avoids the double-space problem where
-        # SCP would consume 1.4 GB in /tmp and Glance would need another 1.4 GB to write
-        # the image store, exceeding the ~2.1 GB free on /dev/vda1.
+        # --- OpenStack headnode (192.168.202.1): two-step Glance upload ---
+        # Step 1: create image record (metadata only, no file) via paramiko → get UUID
+        # Step 2: stream file data to Glance PUT /v2/images/{id}/file via curl on the
+        #         headnode, piped through an SSH subprocess stdin.
+        # This avoids: (a) double-read checksum issue with openstack CLI + /dev/stdin,
+        # (b) /tmp staging double-space problem, (c) gevent+paramiko stdin conflict.
         env_str = (
             f"OS_AUTH_URL=http://controller:5000/v3 "
             f"OS_USERNAME={os_auth.get('username', 'cloud_admin')} "
@@ -1307,49 +1308,70 @@ def api_upload_image():
             f"OS_PROJECT_DOMAIN_NAME={os_auth.get('project_domain_name', os_auth.get('domain_name', 'Cloud'))} "
             f"OS_IDENTITY_API_VERSION=3 "
         )
-        glance_cmd = (
-            f"{env_str}openstack image create "
-            f"--file /dev/stdin "
-            f"--disk-format {disk_format} "
-            f"--container-format bare "
-            f"--public "
-            f"-f value -c id "
-            f'"{name}"'
-        )
         try:
             import subprocess
-            # Use system ssh binary to pipe file directly to openstack image create --file -
-            # Paramiko stdin streaming conflicts with gevent monkey-patching; subprocess avoids this.
-            ssh_cmd = [
+            # Step 1: create queued image record, returns UUID
+            create_cmd = (
+                f"{env_str}openstack image create "
+                f"--disk-format {disk_format} "
+                f"--container-format bare "
+                f"--public "
+                f"-f value -c id "
+                f'"{name}"'
+            )
+            glance_id_raw = _os_ssh_cmd(create_cmd, timeout=30)
+            glance_id = glance_id_raw.splitlines()[0].strip()
+            if not glance_id or len(glance_id) < 32:
+                raise RuntimeError(f"Unexpected image create output: {glance_id_raw!r}")
+            logger.info("Glance image record created: id=%s", glance_id)
+
+            # Step 2: stream file to Glance via curl on headnode (reads stdin, no /tmp)
+            # curl --data-binary @- reads from its stdin, which is the SSH channel stdin
+            upload_cmd = (
+                f"TOKEN=$({env_str}openstack token issue -f value -c id) && "
+                f"curl -s -X PUT "
+                f"-H \"X-Auth-Token: $TOKEN\" "
+                f"-H \"Content-Type: application/octet-stream\" "
+                f"-w '\\n%{{http_code}}' "
+                f"--data-binary @- "
+                f"http://controller:9292/v2/images/{glance_id}/file"
+            )
+            ssh_upload = [
                 "ssh", "-i", ssh_key,
                 "-o", "StrictHostKeyChecking=no",
                 "-o", "BatchMode=yes",
                 "-o", "ServerAliveInterval=30",
+                "-o", "ConnectTimeout=30",
                 "ubuntu@192.168.202.1",
-                glance_cmd,
+                upload_cmd,
             ]
             with open(str(tmp_path), "rb") as fh:
                 proc = subprocess.Popen(
-                    ssh_cmd, stdin=fh,
+                    ssh_upload, stdin=fh,
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 )
                 out_bytes, err_bytes = proc.communicate(timeout=600)
-            exit_code = proc.returncode
+
             out = out_bytes.decode("utf-8", errors="replace").strip()
             err_out = err_bytes.decode("utf-8", errors="replace").strip()
-            if exit_code == 0:
-                glance_id = out.splitlines()[0].strip() if out else None
-                if not glance_id or len(glance_id) < 32:
-                    glance_id = None
-                primary_path = f"glance://{glance_id}" if glance_id else f"glance://{name}"
-                results["openstack"] = {"ok": True, "glance_id": glance_id or name}
-                logger.info("Glance upload via SSH stdin succeeded: id=%s", glance_id)
+            http_code = out.splitlines()[-1].strip() if out else "0"
+
+            if proc.returncode == 0 and http_code in ("204", "200"):
+                primary_path = f"glance://{glance_id}"
+                results["openstack"] = {"ok": True, "glance_id": glance_id}
+                logger.info("Glance upload via SSH+curl succeeded: id=%s http=%s", glance_id, http_code)
             else:
-                msg = (err_out or out or "unknown error")[:300]
-                logger.warning("Glance upload via SSH stdin failed (exit %d): %s", exit_code, msg)
+                # Clean up the queued (empty) image record
+                try:
+                    _os_ssh_cmd(f"openstack image delete {glance_id}", timeout=15)
+                except Exception:
+                    pass
+                msg = (err_out or out or f"HTTP {http_code}")[:300]
+                logger.warning("Glance upload via SSH+curl failed (exit %d, http %s): %s",
+                               proc.returncode, http_code, msg)
                 results["openstack"] = {"ok": False, "error": msg}
         except Exception as e:
-            logger.warning("Glance upload via SSH stdin exception: %s", e)
+            logger.warning("Glance upload exception: %s", e)
             results["openstack"] = {"ok": False, "error": str(e)[:300]}
 
         # --- Linux headnode (192.168.201.1): SCP only ---
