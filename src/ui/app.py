@@ -134,6 +134,7 @@ def _get_os_flavors() -> list:
         return _os_ssh_cache.get(cache_key, [])
 
 
+def get_orchestrator():
     global _orchestrator
     if _orchestrator is None:
         hosts_cfg, db_cfg, net_cfg, os_cfg = load_configs()
