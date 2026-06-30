@@ -1320,21 +1320,20 @@ def api_upload_image():
             c = paramiko.SSHClient()
             c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             c.connect("192.168.202.1", username="ubuntu", key_filename=ssh_key, timeout=30)
-            transport = c.get_transport()
-            transport.set_keepalive(30)
-            chan = transport.open_session()
-            chan.exec_command(glance_cmd)
-            # Stream file to stdin in 256 KB chunks
+            c.get_transport().set_keepalive(30)
+            stdin_ch, stdout_ch, stderr_ch = c.exec_command(glance_cmd)
+            stdin_ch.channel.settimeout(None)
+            # Stream file to stdin in 1 MB chunks — no /tmp staging on headnode
             with open(str(tmp_path), "rb") as fh:
                 while True:
-                    chunk = fh.read(262144)
+                    chunk = fh.read(1048576)
                     if not chunk:
                         break
-                    chan.sendall(chunk)
-            chan.shutdown_write()
-            exit_code = chan.recv_exit_status()
-            out = chan.recv(65536).decode("utf-8", errors="replace").strip()
-            err_out = chan.recv_stderr(65536).decode("utf-8", errors="replace").strip()
+                    stdin_ch.write(chunk)
+            stdin_ch.channel.shutdown_write()
+            exit_code = stdout_ch.channel.recv_exit_status()
+            out = stdout_ch.read().decode("utf-8", errors="replace").strip()
+            err_out = stderr_ch.read().decode("utf-8", errors="replace").strip()
             c.close()
             if exit_code == 0:
                 glance_id = out.splitlines()[0].strip() if out else None
