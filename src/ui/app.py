@@ -98,7 +98,7 @@ def _os_ssh_cmd(cmd: str, timeout: int = 30) -> str:
 
 
 def _get_os_hypervisors() -> list:
-    """Return hypervisor list via SSH, cached for 60s."""
+    """Return hypervisor list via SSH, cached 60s on success, 20s on failure."""
     import time, json as _json
     global _os_ssh_cache, _os_ssh_cache_ttl
     now = time.time()
@@ -112,6 +112,7 @@ def _get_os_hypervisors() -> list:
         return data
     except Exception as e:
         logger.warning("OpenStack hypervisors via SSH failed: %s", e)
+        _os_ssh_cache_ttl = now + 20  # retry cooldown — don't hammer on every request
         return _os_ssh_cache.get("hypervisors", [])
 
 
@@ -132,6 +133,7 @@ def _get_os_flavors() -> list:
         return data
     except Exception as e:
         logger.warning("OpenStack flavors via SSH failed: %s", e)
+        _os_ssh_cache["flavors_ts"] = now + 20 - 120  # retry in 20s instead of 120s
         return _os_ssh_cache.get(cache_key, [])
 
 
@@ -1488,8 +1490,8 @@ def api_list_servers():
                 vcpus_used = hv.get("vCPUs Used", hv.get("vcpus_used", 0))
                 ram_total = hv.get("Memory MB", hv.get("memory_mb", 0))
                 ram_used = hv.get("Memory MB Used", hv.get("memory_mb_used", 0))
-                disk_total = hv.get("Local Storage GB", hv.get("local_gb", 0))
-                disk_used = hv.get("Local Storage Used GB", hv.get("local_gb_used", 0))
+                disk_total = hv.get("Local Storage (GB)", hv.get("Local Storage GB", hv.get("local_gb", 0)))
+                disk_used = hv.get("Local Storage (Used GB)", hv.get("Local Storage Used GB", hv.get("local_gb_used", 0)))
                 state = str(hv.get("State", hv.get("state", "up"))).lower()
                 result.append({
                     "id": f"os-{hv.get('Hypervisor Hostname', hv.get('hypervisor_hostname', ''))}",
