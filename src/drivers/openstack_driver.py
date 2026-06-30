@@ -41,6 +41,7 @@ class OpenStackDriver:
         self._admin_token: Optional[str] = None
         self._admin_token_expiry: float = 0
         self._token_lock = threading.Lock()
+        self._unreachable_until: float = 0  # back-off when Keystone is down
 
     # ------------------------------------------------------------------
     # Keystone — token management
@@ -48,7 +49,11 @@ class OpenStackDriver:
 
     def _get_admin_token(self) -> str:
         with self._token_lock:
-            if self._admin_token and time.time() < self._admin_token_expiry:
+            now = time.time()
+            # Fast-fail if we recently couldn't reach Keystone (60s back-off)
+            if now < self._unreachable_until:
+                raise ConnectionError("OpenStack Keystone unreachable (back-off active)")
+            if self._admin_token and now < self._admin_token_expiry:
                 return self._admin_token
             payload = {
                 "auth": {
@@ -70,10 +75,15 @@ class OpenStackDriver:
                     },
                 }
             }
-            r = requests.post(f"{self.auth_url}/v3/auth/tokens", json=payload, timeout=15)
-            r.raise_for_status()
+            try:
+                r = requests.post(f"{self.auth_url}/v3/auth/tokens", json=payload, timeout=5)
+                r.raise_for_status()
+            except Exception as e:
+                self._unreachable_until = time.time() + 60  # back off 60s
+                raise
             self._admin_token = r.headers["X-Subject-Token"]
-            self._admin_token_expiry = time.time() + self.token_cache_ttl
+            self._admin_token_expiry = now + self.token_cache_ttl
+            self._unreachable_until = 0
             logger.debug("Admin token refreshed")
             return self._admin_token
 

@@ -1206,8 +1206,12 @@ def api_upload_image():
             """SCP tmp_path to host:remote_path, then optionally run cmd."""
             c = paramiko.SSHClient()
             c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            c.connect(host_ip, username="ubuntu", key_filename=ssh_key, timeout=20)
+            c.connect(host_ip, username="ubuntu", key_filename=ssh_key, timeout=30)
+            # No timeout on the SFTP transfer itself — large images can take minutes
+            transport = c.get_transport()
+            transport.set_keepalive(30)
             with c.open_sftp() as sftp:
+                sftp.get_channel().settimeout(None)
                 sftp.put(str(tmp_path), remote_path)
             out, err_out, code = "", "", 0
             if cmd:
