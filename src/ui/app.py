@@ -1440,11 +1440,11 @@ def api_list_servers():
         try:
             for hv in _get_os_hypervisors():
                 vcpus_total = hv.get("vCPUs", hv.get("vcpus", 0))
-                vcpus_used = hv.get("Running VMs", hv.get("running_vms", 0))
+                vcpus_used = hv.get("vCPUs Used", hv.get("vcpus_used", 0))
                 ram_total = hv.get("Memory MB", hv.get("memory_mb", 0))
-                ram_free = hv.get("Free RAM MB", hv.get("free_ram_mb", ram_total))
+                ram_used = hv.get("Memory MB Used", hv.get("memory_mb_used", 0))
                 disk_total = hv.get("Local Storage GB", hv.get("local_gb", 0))
-                disk_free = hv.get("Free Disk GB", hv.get("free_disk_gb", disk_total))
+                disk_used = hv.get("Local Storage Used GB", hv.get("local_gb_used", 0))
                 state = str(hv.get("State", hv.get("state", "up"))).lower()
                 result.append({
                     "id": f"os-{hv.get('Hypervisor Hostname', hv.get('hypervisor_hostname', ''))}",
@@ -1453,9 +1453,9 @@ def api_list_servers():
                     "cpuTotal": vcpus_total,
                     "cpuUsed": vcpus_used,
                     "ramTotal": round(ram_total / 1024),
-                    "ramUsed": round((ram_total - ram_free) / 1024),
+                    "ramUsed": round(ram_used / 1024),
                     "diskTotal": disk_total,
-                    "diskUsed": disk_total - disk_free,
+                    "diskUsed": disk_used,
                     "zone": "AZ-OpenStack-1",
                     "status": "online" if state in ("up", "enabled") else "offline",
                     "vms_running": hv.get("Running VMs", hv.get("running_vms", 0)),
@@ -1503,14 +1503,14 @@ def api_list_zones():
                 zid = "AZ-OpenStack-1"
                 if zid in zones:
                     zones[zid]["servers"] += 1
-                    vcpus_used = hv.get("Running VMs", hv.get("running_vms", 0))
                     vcpus_total = hv.get("vCPUs", hv.get("vcpus", 0))
+                    vcpus_used = hv.get("vCPUs Used", hv.get("vcpus_used", 0))
                     ram_total = hv.get("Memory MB", hv.get("memory_mb", 0))
-                    ram_free = hv.get("Free RAM MB", hv.get("free_ram_mb", ram_total))
+                    ram_used = hv.get("Memory MB Used", hv.get("memory_mb_used", 0))
                     zones[zid]["cpuTotal"] += vcpus_total
                     zones[zid]["cpuUsed"] += vcpus_used
                     zones[zid]["ramTotal"] += round(ram_total / 1024)
-                    zones[zid]["ramUsed"] += round((ram_total - ram_free) / 1024)
+                    zones[zid]["ramUsed"] += round(ram_used / 1024)
                     state = hv.get("State", hv.get("state", "up"))
                     if str(state).lower() in ("up", "enabled"):
                         zones[zid]["serversOnline"] += 1
