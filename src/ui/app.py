@@ -1756,6 +1756,11 @@ def api_task_status_json(ticket_id):
     task = orch.get_task_status(ticket_id)
     if not task:
         return jsonify({"error": "not found"}), 404
+    # TaskQueue reports "completed"/"failed" (src/queue/task_queue.py);
+    # the Nueva UI's poller only recognizes "done"/"error", so without this
+    # mapping it never detects completion and polls until its own timeout.
+    status_map = {"completed": "done", "failed": "error"}
+    task["status"] = status_map.get(task["status"], task["status"])
     return jsonify(task)
 
 

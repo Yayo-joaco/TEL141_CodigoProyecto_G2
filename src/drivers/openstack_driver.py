@@ -43,7 +43,7 @@ class OpenStackDriver:
         self._token_lock = threading.Lock()
         self._unreachable_until: float = 0  # back-off when Keystone is down
         self._flavor_lock = threading.Lock()  # serializes get_or_create_flavor
-        self._member_role_id: Optional[str] = None
+        self._admin_role_id: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Keystone — token management
@@ -142,34 +142,36 @@ class OpenStackDriver:
         r.raise_for_status()
         return r.json()["users"][0]["id"]
 
-    def _get_member_role_id(self) -> str:
+    def _get_admin_role_id(self) -> str:
         """
-        Look up the standard non-admin project role. Some deployments name
-        it "member" (Keystone default since Queens), others keep the
-        legacy "_member_" alias — falling back to an arbitrary roles[0]
-        (as this used to do) can hand out a role with no compute:create
-        permission, which surfaces later as an opaque 403 on VM boot
-        instead of a clear error here.
+        Nova's forced-host placement (availability_zone="nova:<hostname>",
+        used on every VM we boot since our placement engine always picks a
+        host) is gated by policy on is_admin:True. A project-scoped
+        "member"/"_member_" role passes plain compute:create but gets a
+        403 the instant force_host is set — that 403 is what surfaced as
+        "OS VM boot error: 403 Forbidden for .../servers" for every VM.
+        Granting "admin" on the per-slice project (not swapping the
+        cloud_admin account's own project scope) is what actually unlocks
+        forced placement.
         """
-        if self._member_role_id:
-            return self._member_role_id
-        for candidate in ("member", "_member_"):
-            r = requests.get(f"{self.auth_url}/v3/roles",
-                             params={"name": candidate},
-                             headers=self._headers(), timeout=10)
-            r.raise_for_status()
-            roles = r.json()["roles"]
-            if roles:
-                self._member_role_id = roles[0]["id"]
-                return self._member_role_id
-        raise RuntimeError(
-            "No 'member' or '_member_' role found in Keystone — cannot "
-            "grant the slice project usable permissions."
-        )
+        if self._admin_role_id:
+            return self._admin_role_id
+        r = requests.get(f"{self.auth_url}/v3/roles",
+                         params={"name": "admin"},
+                         headers=self._headers(), timeout=10)
+        r.raise_for_status()
+        roles = r.json()["roles"]
+        if not roles:
+            raise RuntimeError(
+                "No 'admin' role found in Keystone — cannot grant the "
+                "slice project forced-placement permissions."
+            )
+        self._admin_role_id = roles[0]["id"]
+        return self._admin_role_id
 
     def assign_admin_to_project(self, project_id: str):
         user_id = self._get_admin_user_id()
-        role_id = self._get_member_role_id()
+        role_id = self._get_admin_role_id()
         r = requests.put(
             f"{self.auth_url}/v3/projects/{project_id}/users/{user_id}/roles/{role_id}",
             headers=self._headers(), timeout=10,
