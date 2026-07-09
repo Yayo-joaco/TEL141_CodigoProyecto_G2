@@ -307,14 +307,39 @@ class Orchestrator:
             self.db.save_slice(slice_obj)
             return []
 
-        if result.get("errors"):
-            logger.warning("OS deploy had errors: %s", result["errors"])
-
         slice_obj.openstack_project_id = result.get("project_id", "")
         net_ids = result.get("all_network_ids") or (
             [result["network_id"]] if result.get("network_id") else []
         )
         slice_obj.openstack_network_ids = net_ids
+
+        # deploy_slice boots VMs in parallel and collects per-VM exceptions
+        # into result["errors"] instead of raising, so a slice with any
+        # failed VM would otherwise fall through to the success path below
+        # and get marked ACTIVE with phantom VMs (they'd have no
+        # openstack_server_id, so nothing SSH/Horizon-visible ever existed).
+        # Treat any boot failure as whole-slice failure — same all-or-nothing
+        # contract as the Linux/placement path — and tear down whatever
+        # partially came up so it doesn't leak a Keystone project + orphan
+        # VMs the user never sees.
+        if result.get("errors") or len(result.get("server_ids", {})) < len(vms):
+            error = ("; ".join(result.get("errors", [])) or
+                     f"Solo {len(result.get('server_ids', {}))}/{len(vms)} VMs bootearon")
+            logger.error("OpenStack deploy incomplete for slice %s: %s",
+                         slice_obj.id, error)
+            slice_obj.status = SliceStatus.ERROR
+            slice_obj.error_message = error
+            for vm in vms:
+                sid = result.get("server_ids", {}).get(vm.name)
+                if sid:
+                    vm.openstack_server_id = sid
+            try:
+                os_drv.teardown_slice(slice_obj, vms)
+            except Exception as e:
+                logger.warning("Cleanup after partial OS deploy failed: %s", e)
+            self.db.save_slice(slice_obj)
+            return []
+
         slice_obj.link_vlans = link_vlans if link_vlans else None
         slice_obj.status = SliceStatus.ACTIVE
         self.db.save_slice(slice_obj)

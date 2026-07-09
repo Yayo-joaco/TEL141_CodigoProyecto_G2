@@ -42,6 +42,8 @@ class OpenStackDriver:
         self._admin_token_expiry: float = 0
         self._token_lock = threading.Lock()
         self._unreachable_until: float = 0  # back-off when Keystone is down
+        self._flavor_lock = threading.Lock()  # serializes get_or_create_flavor
+        self._member_role_id: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Keystone — token management
@@ -141,17 +143,29 @@ class OpenStackDriver:
         return r.json()["users"][0]["id"]
 
     def _get_member_role_id(self) -> str:
-        r = requests.get(f"{self.auth_url}/v3/roles",
-                         params={"name": "member"},
-                         headers=self._headers(), timeout=10)
-        r.raise_for_status()
-        roles = r.json()["roles"]
-        if not roles:
-            r2 = requests.get(f"{self.auth_url}/v3/roles",
-                              headers=self._headers(), timeout=10)
-            r2.raise_for_status()
-            roles = r2.json()["roles"]
-        return roles[0]["id"]
+        """
+        Look up the standard non-admin project role. Some deployments name
+        it "member" (Keystone default since Queens), others keep the
+        legacy "_member_" alias — falling back to an arbitrary roles[0]
+        (as this used to do) can hand out a role with no compute:create
+        permission, which surfaces later as an opaque 403 on VM boot
+        instead of a clear error here.
+        """
+        if self._member_role_id:
+            return self._member_role_id
+        for candidate in ("member", "_member_"):
+            r = requests.get(f"{self.auth_url}/v3/roles",
+                             params={"name": candidate},
+                             headers=self._headers(), timeout=10)
+            r.raise_for_status()
+            roles = r.json()["roles"]
+            if roles:
+                self._member_role_id = roles[0]["id"]
+                return self._member_role_id
+        raise RuntimeError(
+            "No 'member' or '_member_' role found in Keystone — cannot "
+            "grant the slice project usable permissions."
+        )
 
     def assign_admin_to_project(self, project_id: str):
         user_id = self._get_admin_user_id()
@@ -213,18 +227,36 @@ class OpenStackDriver:
 
     def get_or_create_flavor(self, name: str, vcpus: int,
                              ram_mb: int, disk_gb: int) -> str:
+        """
+        Concurrent VM boots for the same slice share one flavor name
+        (f-{vcpus}c-{ram_mb}m), so parallel callers racing the
+        GET-then-POST would both see "not found" and both POST, and Nova
+        rejects the loser with 409 Conflict. The lock serializes the
+        check-then-create so only one caller ever creates it; a 409 from
+        a slower duplicate (e.g. a leftover flavor from a previous run
+        that completed between our GET and POST) is treated as "already
+        exists" and resolved with one more GET instead of raising.
+        """
         url = f"{self._nova_url}/v2.1/flavors"
-        r = requests.get(url, headers=self._headers(), timeout=10)
-        r.raise_for_status()
-        for f in r.json().get("flavors", []):
-            if f["name"] == name:
-                return f["id"]
-        payload = {"flavor": {"name": name, "vcpus": vcpus,
-                               "ram": ram_mb, "disk": disk_gb,
-                               "os-flavor-access:is_public": True}}
-        r2 = requests.post(url, json=payload, headers=self._headers(), timeout=10)
-        r2.raise_for_status()
-        return r2.json()["flavor"]["id"]
+        with self._flavor_lock:
+            r = requests.get(url, headers=self._headers(), timeout=10)
+            r.raise_for_status()
+            for f in r.json().get("flavors", []):
+                if f["name"] == name:
+                    return f["id"]
+            payload = {"flavor": {"name": name, "vcpus": vcpus,
+                                   "ram": ram_mb, "disk": disk_gb,
+                                   "os-flavor-access:is_public": True}}
+            r2 = requests.post(url, json=payload, headers=self._headers(), timeout=10)
+            if r2.status_code == 409:
+                r3 = requests.get(url, headers=self._headers(), timeout=10)
+                r3.raise_for_status()
+                for f in r3.json().get("flavors", []):
+                    if f["name"] == name:
+                        return f["id"]
+                raise RuntimeError(f"Flavor '{name}' 409'd but isn't listed")
+            r2.raise_for_status()
+            return r2.json()["flavor"]["id"]
 
     # ------------------------------------------------------------------
     # Nova — hypervisor stats (for our custom placement)
