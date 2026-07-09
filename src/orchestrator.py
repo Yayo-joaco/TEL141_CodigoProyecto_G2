@@ -570,12 +570,27 @@ class Orchestrator:
 
         infra = getattr(slice_obj, "infrastructure_target", "linux") if slice_obj else "linux"
 
+        teardown_error = None
         if infra == "openstack" and slice_obj:
             try:
                 os_drv = self._get_openstack_driver()
-                os_drv.teardown_slice(slice_obj, vms)
+                teardown_ok = os_drv.teardown_slice(slice_obj, vms)
             except Exception as e:
                 logger.error("OS teardown failed for slice %s: %s", slice_id, e)
+                teardown_ok = False
+            if not teardown_ok:
+                # teardown_slice already retried every resource type it
+                # could discover — a False here means something Neutron/Nova
+                # rejected (permissions, still-attached dependency, network
+                # blip). Surface it instead of silently reporting success:
+                # the project_id is what the user needs to clean up manually
+                # via `openstack --os-project-id <id> ...` if this keeps
+                # failing.
+                teardown_error = (
+                    f"Limpieza de recursos OpenStack incompleta para el proyecto "
+                    f"{getattr(slice_obj, 'openstack_project_id', '?')}; revisar manualmente"
+                )
+                logger.error("Slice %s: %s", slice_id, teardown_error)
 
             # OVS2 VLAN pruning cleanup (OpenStack cluster physical switch).
             # We don't persist per-VM hypervisor hostnames, so prune across
@@ -590,12 +605,18 @@ class Orchestrator:
                     all_hostnames = list(ovs2.port_map.keys())
                     ovs2.remove_slice_vlans(vlan_ids, all_hostnames)
 
+            # Local bookkeeping is cleared either way — a force-delete means
+            # the user wants this slice gone from their view regardless of
+            # cloud-side outcome, and leaving a phantom ACTIVE/ERROR record
+            # around blocks VLAN/quota reuse for no benefit. What matters is
+            # that `success` (below) still reflects the real teardown result
+            # so the caller finds out cleanup wasn't 100% clean.
             slice_obj.status = SliceStatus.DELETED
             self.db.save_slice(slice_obj)
             for vm in vms:
                 vm.status = VMStatus.DELETED
                 self.db.save_vm(vm)
-            success = True
+            success = teardown_ok
         else:
             # OVS1 VLAN pruning cleanup (Linux cluster physical switch)
             if slice_obj:
@@ -613,11 +634,15 @@ class Orchestrator:
             success = self.slice_manager.delete_slice(slice_id)
 
         self.db.release_vlan(slice_id)
-        self.db.save_log(slice_id, "orchestrator", "INFO",
-                         f"Slice eliminado, VLAN liberada, infra={infra}",
+        self.db.save_log(slice_id, "orchestrator",
+                         "INFO" if success else "WARNING",
+                         teardown_error or f"Slice eliminado, VLAN liberada, infra={infra}",
                          user_id=user.id if user else None)
         self.refresh_hosts()
-        return {"success": success, "slice_id": slice_id}
+        result = {"success": success, "slice_id": slice_id}
+        if teardown_error:
+            result["error"] = teardown_error
+        return result
 
     def get_slice(self, slice_id: str) -> Optional[dict]:
         return self.slice_manager.get_slice_info(slice_id)

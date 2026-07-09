@@ -309,12 +309,19 @@ class OpenStackDriver:
         r.raise_for_status()
         return r.json()["network"]["id"]
 
-    def create_link_network(self, name: str, vlan_id: int, project_id: str) -> str:
-        """Create a per-link VLAN network with NO subnet — a pure L2 segment
-        matching Linux's tap-only, no-DHCP link interfaces. Two VMs joined
-        to this network (one port each) can see each other at L2 (arping)
-        but get no IP/DHCP on it, exactly like a Linux link tap."""
-        return self.create_vlan_network(name, vlan_id, project_id)
+    def create_link_network(self, name: str, vlan_id: int, project_id: str,
+                            link_idx: int) -> str:
+        """Create a per-link VLAN network with a real Neutron /30 subnet,
+        matching Lab6's ring-topology pattern (192.168.1.0/30, .2.0/30, ...
+        one per link_idx). No gateway — a pure point-to-point segment, so
+        DHCP hands out both usable addresses (.1 and .2) to the two peer
+        VMs' ports. Safe to reuse the same /30 range across different
+        slices/links since each one is a separate VLAN-isolated network."""
+        net_id = self.create_vlan_network(name, vlan_id, project_id)
+        cidr = f"192.168.{link_idx + 1}.0/30"
+        self.create_subnet(net_id, cidr, f"{name}-subnet", project_id,
+                           enable_dhcp=True, disable_gateway=True)
+        return net_id
 
     def create_port(self, network_id: str, project_id: str,
                     name: str = None) -> str:
@@ -334,7 +341,8 @@ class OpenStackDriver:
     def create_subnet(self, network_id: str, cidr: str,
                       name: str, project_id: str,
                       enable_dhcp: bool = True,
-                      gateway_ip: str = None) -> str:
+                      gateway_ip: str = None,
+                      disable_gateway: bool = False) -> str:
         url = f"{self._neutron_url}/v2.0/subnets"
         payload = {"subnet": {
             "network_id": network_id,
@@ -344,7 +352,12 @@ class OpenStackDriver:
             "tenant_id": project_id,
             "enable_dhcp": enable_dhcp,
         }}
-        if gateway_ip:
+        if disable_gateway:
+            # Explicit null, not just "omit the key" — Neutron defaults an
+            # unset gateway_ip to the subnet's first address, which on a
+            # /30 shrinks the DHCP pool to a single usable address.
+            payload["subnet"]["gateway_ip"] = None
+        elif gateway_ip:
             payload["subnet"]["gateway_ip"] = gateway_ip
         r = requests.post(url, json=payload, headers=self._headers(), timeout=15)
         r.raise_for_status()
@@ -378,7 +391,7 @@ class OpenStackDriver:
         cr.raise_for_status()
         net_id = cr.json()["network"]["id"]
         sub_id = self.create_subnet(net_id, cidr, f"{name}-subnet", "admin",
-                                    enable_dhcp=False)
+                                    enable_dhcp=True, gateway_ip="10.60.4.1")
         return net_id, sub_id
 
     def create_router(self, name: str, project_id: str,
@@ -401,14 +414,62 @@ class OpenStackDriver:
         return router_id
 
     def delete_router(self, router_id: str, subnet_id: str = None):
+        # Removing all router interfaces ourselves (rather than trusting a
+        # single caller-supplied subnet_id) is what lets teardown delete a
+        # router it didn't create the interfaces for in the same call —
+        # Neutron refuses DELETE /routers/{id} with 409 while any interface
+        # is still attached.
+        pr = requests.get(f"{self._neutron_url}/v2.0/ports",
+                          params={"device_id": router_id}, headers=self._headers(), timeout=10)
+        interface_subnets = set()
         if subnet_id:
+            interface_subnets.add(subnet_id)
+        if pr.status_code == 200:
+            for port in pr.json().get("ports", []):
+                if port.get("device_owner", "").startswith("network:router_interface"):
+                    for fip in port.get("fixed_ips", []):
+                        if fip.get("subnet_id"):
+                            interface_subnets.add(fip["subnet_id"])
+        for sid in interface_subnets:
             requests.put(
                 f"{self._neutron_url}/v2.0/routers/{router_id}/remove_router_interface",
-                json={"subnet_id": subnet_id},
+                json={"subnet_id": sid},
                 headers=self._headers(), timeout=10,
             )
-        requests.delete(f"{self._neutron_url}/v2.0/routers/{router_id}",
-                        headers=self._headers(), timeout=10)
+        r = requests.delete(f"{self._neutron_url}/v2.0/routers/{router_id}",
+                            headers=self._headers(), timeout=10)
+        if r.status_code not in (204, 404):
+            r.raise_for_status()
+
+    def list_routers_for_project(self, project_id: str) -> List[dict]:
+        r = requests.get(f"{self._neutron_url}/v2.0/routers",
+                         params={"tenant_id": project_id}, headers=self._headers(), timeout=10)
+        r.raise_for_status()
+        return r.json().get("routers", [])
+
+    def list_security_groups_for_project(self, project_id: str) -> List[dict]:
+        r = requests.get(f"{self._neutron_url}/v2.0/security-groups",
+                         params={"tenant_id": project_id}, headers=self._headers(), timeout=10)
+        r.raise_for_status()
+        return r.json().get("security_groups", [])
+
+    def list_floatingips_for_project(self, project_id: str) -> List[dict]:
+        r = requests.get(f"{self._neutron_url}/v2.0/floatingips",
+                         params={"tenant_id": project_id}, headers=self._headers(), timeout=10)
+        r.raise_for_status()
+        return r.json().get("floatingips", [])
+
+    def list_networks_for_project(self, project_id: str) -> List[dict]:
+        r = requests.get(f"{self._neutron_url}/v2.0/networks",
+                         params={"tenant_id": project_id}, headers=self._headers(), timeout=10)
+        r.raise_for_status()
+        return r.json().get("networks", [])
+
+    def list_servers_for_project(self, project_id: str) -> List[dict]:
+        r = requests.get(f"{self._nova_url}/v2.1/servers/detail",
+                         headers=self._headers(project_id), timeout=10)
+        r.raise_for_status()
+        return r.json().get("servers", [])
 
     def delete_network(self, network_id: str):
         r = requests.delete(f"{self._neutron_url}/v2.0/networks/{network_id}",
@@ -590,6 +651,19 @@ class OpenStackDriver:
     # Composite: deploy_slice / teardown_slice
     # ------------------------------------------------------------------
 
+    def _get_or_create_isolated_fallback_network(self, slice_obj, project_id: str) -> str:
+        """A VM with no topology links and no internet still needs a NIC to
+        boot Nova on. Reuses the slice's own VLAN (already assigned per-slice
+        for isolation/OVS2-pruning bookkeeping) as a pure L2 network with no
+        subnet — no address is ever expected on it. Idempotent: reuses the
+        network if a previous boot in this slice already created it."""
+        existing = self.list_networks_for_project(project_id)
+        name = f"net-{slice_obj.id}"
+        for net in existing:
+            if net.get("name") == name:
+                return net["id"]
+        return self.create_vlan_network(name, slice_obj.vlan_id or 100, project_id)
+
     def deploy_slice(self, slice_obj, vms, force_hosts: Dict[str, str] = None,
                      vm_link_map: Dict[str, List[dict]] = None) -> dict:
         """
@@ -598,8 +672,12 @@ class OpenStackDriver:
         vm_link_map: {vm_name → [{link_idx, vlan_id, peer_vm_name}]} — one
           entry per topology link this VM participates in (mirrors the Linux
           driver's per-link tap model). Each distinct link_idx gets its own
-          Neutron VLAN network with NO subnet (pure L2, no DHCP) so that
-          arping between peer VMs surfaces that link's specific VLAN.
+          Neutron VLAN network with a real /30 subnet (see create_link_network).
+        There is no per-slice primary network: a VM's only interfaces are its
+        link NICs, plus — only if enable_internet is set — one extra NIC on
+        the shared external network (DHCP-leased 10.60.4.x, no floating IP,
+        no router). This matches Lab6 Actividad 1's model, where a VM without
+        internet gets no externally-routable interface at all.
         Returns info dict with project_id, network_ids, link_vlans (with
         network_id attached), vm server_ids.
         """
@@ -611,20 +689,8 @@ class OpenStackDriver:
         self.assign_admin_to_project(project_id)
         logger.info("OS project created: %s for slice %s", project_id, slice_obj.id)
 
-        # Primary network per slice (management/internet) — one flat VLAN network
-        vlan_id = slice_obj.vlan_id or 100
-        subnet = slice_obj.subnet or "10.60.3.0/24"
-        net_id = self.create_vlan_network(
-            f"net-{slice_obj.id}", vlan_id, project_id
-        )
-        gw = subnet.rsplit(".", 1)[0] + ".1"
-        sub_id = self.create_subnet(net_id, subnet, f"subnet-{slice_obj.id}",
-                                    project_id, enable_dhcp=slice_obj.enable_dhcp,
-                                    gateway_ip=gw)
-
-        # One VLAN network per topology link (no subnet — pure L2, like a
-        # Linux link tap). Built once up front so peer VMs share the same
-        # network/VLAN for their shared link.
+        # One VLAN network + /30 subnet per topology link. Built once up
+        # front so peer VMs share the same network/VLAN for their shared link.
         link_vlan_by_idx: Dict[int, int] = {}
         for lnks in vm_link_map.values():
             for lnk in lnks:
@@ -634,16 +700,20 @@ class OpenStackDriver:
         link_network_by_idx: Dict[int, str] = {}
         for link_idx, link_vlan in link_vlan_by_idx.items():
             link_network_by_idx[link_idx] = self.create_link_network(
-                f"link-{slice_obj.id}-{link_idx}", link_vlan, project_id
+                f"link-{slice_obj.id}-{link_idx}", link_vlan, project_id, link_idx
             )
 
-        ext_net_id = None
-        router_id = None
-        if slice_obj.enable_internet:
-            ext_net_id, _ = self.get_or_create_external_network()
-            router_id = self.create_router(
-                f"router-{slice_obj.id}", project_id, ext_net_id, sub_id
-            )
+        # Fallback isolated network for the edge case of a VM with no
+        # topology links and no internet (e.g. a lone 1-VM slice) — Nova
+        # still needs a NIC to boot on. Created lazily only if a VM actually
+        # needs it.
+        needs_fallback = any(
+            not vm_link_map.get(vm.name) and not vm.enable_internet for vm in vms
+        )
+        fallback_net_id = (
+            self._get_or_create_isolated_fallback_network(slice_obj, project_id)
+            if needs_fallback else None
+        )
 
         sg_id = self.create_security_group(f"sg-{slice_obj.id}", project_id)
 
@@ -659,12 +729,16 @@ class OpenStackDriver:
             )
             host = force_hosts.get(vm.name)
             vm_links = vm_link_map.get(vm.name, [])
-            # Primary NIC first (index 0 in the networks list), then one NIC
-            # per topology link this VM participates in.
-            network_ids = [net_id] + [
+            network_ids = [
                 link_network_by_idx[lnk["link_idx"]] for lnk in vm_links
                 if lnk["link_idx"] in link_network_by_idx
             ]
+            ext_net_id_for_vm = None
+            if vm.enable_internet:
+                ext_net_id_for_vm, _ = self.get_or_create_external_network()
+                network_ids.append(ext_net_id_for_vm)
+            if not network_ids:
+                network_ids = [fallback_net_id]
             server_id = self.create_vm(
                 name=f"{slice_obj.name}-{vm.name}",
                 image_id=image_id,
@@ -674,49 +748,57 @@ class OpenStackDriver:
                 force_host=host,
                 security_group_ids=[f"sg-{slice_obj.id}"],
             )
-            ok = self.wait_for_active(server_id, project_id)
-            if not ok:
-                raise RuntimeError(f"VM {vm.name} failed to become ACTIVE")
-            ip = self.get_vm_ip(server_id, project_id)
+            try:
+                ok = self.wait_for_active(server_id, project_id)
+                if not ok:
+                    raise RuntimeError(f"VM {vm.name} failed to become ACTIVE")
+                ext_ip = None
+                if ext_net_id_for_vm:
+                    ext_ip = self.get_vm_ip(server_id, project_id, network_name="external")
 
-            # Match attached ports back to primary vs. link networks by
-            # net_id (list order isn't a documented guarantee).
-            ports = self.list_vm_ports(server_id, project_id)
-            net_to_port = {p.get("net_id"): p.get("port_id") for p in ports}
-            net_to_mac = {p.get("net_id"): p.get("mac_addr") for p in ports}
-            interfaces = [{
-                "type": "primary",
-                "network_id": net_id,
-                "port_id": net_to_port.get(net_id),
-                "mac_addr": net_to_mac.get(net_id),
-                # OpenStack guest NIC naming isn't controllable from outside
-                # like the Linux driver's ens3/ens4 convention — eth0 is a
-                # positional best guess (primary NIC is always attached first).
-                "iface_name": "eth0",
-                "vlan_id": vlan_id,
-                "link_idx": None,
-                "peer_vm_name": None,
-            }]
-            for iface_idx, lnk in enumerate(vm_links, start=1):
-                link_net_id = link_network_by_idx.get(lnk["link_idx"])
-                interfaces.append({
-                    "type": "link",
-                    "network_id": link_net_id,
-                    "port_id": net_to_port.get(link_net_id) if link_net_id else None,
-                    "mac_addr": net_to_mac.get(link_net_id) if link_net_id else None,
-                    "iface_name": f"eth{iface_idx}",
-                    "vlan_id": lnk.get("vlan_id"),
-                    "link_idx": lnk["link_idx"],
-                    "peer_vm_name": lnk.get("peer_vm_name"),
-                })
+                # Match attached ports back to link/internet networks by
+                # net_id (list order isn't a documented guarantee).
+                ports = self.list_vm_ports(server_id, project_id)
+                net_to_port = {p.get("net_id"): p.get("port_id") for p in ports}
+                net_to_mac = {p.get("net_id"): p.get("mac_addr") for p in ports}
+                interfaces = []
+                for iface_idx, lnk in enumerate(vm_links):
+                    link_net_id = link_network_by_idx.get(lnk["link_idx"])
+                    interfaces.append({
+                        "type": "link",
+                        "network_id": link_net_id,
+                        "port_id": net_to_port.get(link_net_id) if link_net_id else None,
+                        "mac_addr": net_to_mac.get(link_net_id) if link_net_id else None,
+                        "iface_name": f"eth{iface_idx}",
+                        "vlan_id": lnk.get("vlan_id"),
+                        "link_idx": lnk["link_idx"],
+                        "peer_vm_name": lnk.get("peer_vm_name"),
+                    })
+                if ext_net_id_for_vm:
+                    interfaces.append({
+                        "type": "internet",
+                        "network_id": ext_net_id_for_vm,
+                        "port_id": net_to_port.get(ext_net_id_for_vm),
+                        "mac_addr": net_to_mac.get(ext_net_id_for_vm),
+                        "iface_name": f"eth{len(vm_links)}",
+                        "vlan_id": None,
+                        "link_idx": None,
+                        "peer_vm_name": None,
+                    })
 
-            fip_id, fip_addr = None, None
-            if vm.enable_internet and ext_net_id:
-                primary_port_id = net_to_port.get(net_id)
-                if primary_port_id:
-                    fip_id, fip_addr = self.allocate_floating_ip(ext_net_id, project_id)
-                    self.associate_floating_ip(fip_id, primary_port_id)
-            return vm, server_id, ip, fip_addr, interfaces
+                return vm, server_id, ext_ip, interfaces
+            except Exception:
+                # A VM that fails after boot (ERROR state, port errors, etc.)
+                # must not linger in Nova consuming quota just because the
+                # caller only learns about it through a raised exception —
+                # self-cleanup here is the only place that still has
+                # server_id in scope.
+                try:
+                    self.delete_vm(server_id, project_id)
+                except Exception as cleanup_err:
+                    logger.error("Failed to cleanup errored VM %s (server %s): %s",
+                                vm.name, server_id, cleanup_err)
+                raise
 
         results = {}
         errors = []
@@ -724,14 +806,14 @@ class OpenStackDriver:
             futures = {ex.submit(_boot_vm, vm): vm for vm in vms}
             for fut in as_completed(futures):
                 try:
-                    vm, server_id, ip, fip, interfaces = fut.result()
+                    vm, server_id, ext_ip, interfaces = fut.result()
                     vm.openstack_server_id = server_id
-                    vm.ip_address = ip or ""
-                    vm.ip_address_external = fip or ""
+                    vm.ip_address = ""
+                    vm.ip_address_external = ext_ip or ""
                     vm.interfaces = interfaces
                     results[vm.name] = server_id
-                    logger.info("VM %s booted: server=%s ip=%s links=%d",
-                               vm.name, server_id, ip, len(vm_link_map.get(vm.name, [])))
+                    logger.info("VM %s booted: server=%s ext_ip=%s links=%d",
+                               vm.name, server_id, ext_ip, len(vm_link_map.get(vm.name, [])))
                 except Exception as e:
                     errors.append(str(e))
                     logger.error("OS VM boot error: %s", e)
@@ -739,14 +821,18 @@ class OpenStackDriver:
         if errors:
             logger.error("Slice %s had boot errors: %s", slice_obj.id, errors)
 
+        all_network_ids = list(link_network_by_idx.values())
+        if fallback_net_id:
+            all_network_ids.append(fallback_net_id)
+
         return {
             "project_id": project_id,
-            "network_id": net_id,
-            "subnet_id": sub_id,
-            "router_id": router_id,
+            "network_id": None,
+            "subnet_id": None,
+            "router_id": None,
             "sg_id": sg_id,
             "link_network_ids": list(link_network_by_idx.values()),
-            "all_network_ids": [net_id] + list(link_network_by_idx.values()),
+            "all_network_ids": all_network_ids,
             "server_ids": results,
             "errors": errors,
         }
@@ -780,19 +866,10 @@ class OpenStackDriver:
             return {"network_ids": [], "server_ids": {}, "anchor_interfaces": [],
                     "errors": ["Slice has no openstack_project_id"]}
 
-        existing_net_ids = getattr(slice_obj, "openstack_network_ids", None) or []
-        if isinstance(existing_net_ids, str):
-            import json
-            try:
-                existing_net_ids = json.loads(existing_net_ids)
-            except Exception:
-                existing_net_ids = []
-        net_id = existing_net_ids[0] if existing_net_ids else None
-        if not net_id:
-            return {"network_ids": [], "server_ids": {}, "anchor_interfaces": [],
-                    "errors": ["Slice has no primary network_id"]}
-
-        # One new VLAN network per new link_idx (anchor's links included).
+        # One new VLAN network + /30 subnet per new link_idx (anchor's links
+        # included). There is no per-slice primary network to look up —
+        # newly added VMs only need their own link NICs, plus an internet
+        # NIC if enable_internet is set (see _boot_vm below).
         link_vlan_by_idx: Dict[int, int] = {}
         for lnks in list(new_vm_link_map.values()) + [anchor_link_map]:
             for lnk in lnks:
@@ -802,10 +879,22 @@ class OpenStackDriver:
         link_network_by_idx: Dict[int, str] = {}
         for link_idx, link_vlan in link_vlan_by_idx.items():
             link_network_by_idx[link_idx] = self.create_link_network(
-                f"link-{slice_obj.id}-{link_idx}", link_vlan, project_id
+                f"link-{slice_obj.id}-{link_idx}", link_vlan, project_id, link_idx
             )
 
         errors = []
+
+        # Fallback isolated network for the edge case of a new VM with no
+        # topology links and no internet — Nova still needs a NIC to boot
+        # on. Precomputed before booting (not lazily inside _boot_vm) since
+        # _boot_vm runs concurrently across threads.
+        needs_fallback = any(
+            not new_vm_link_map.get(vm.name) and not vm.enable_internet for vm in new_vms
+        )
+        fallback_net_id = (
+            self._get_or_create_isolated_fallback_network(slice_obj, project_id)
+            if needs_fallback else None
+        )
 
         # Hot-attach the anchor VM's new link interfaces — no restart needed.
         anchor_interfaces = []
@@ -839,10 +928,16 @@ class OpenStackDriver:
             )
             host = force_hosts.get(vm.name)
             vm_links = new_vm_link_map.get(vm.name, [])
-            network_ids = [net_id] + [
+            network_ids = [
                 link_network_by_idx[lnk["link_idx"]] for lnk in vm_links
                 if lnk["link_idx"] in link_network_by_idx
             ]
+            ext_net_id_for_vm = None
+            if vm.enable_internet:
+                ext_net_id_for_vm, _ = self.get_or_create_external_network()
+                network_ids.append(ext_net_id_for_vm)
+            if not network_ids:
+                network_ids = [fallback_net_id]
             server_id = self.create_vm(
                 name=f"{slice_obj.name}-{vm.name}",
                 image_id=image_id,
@@ -852,37 +947,49 @@ class OpenStackDriver:
                 force_host=host,
                 security_group_ids=[f"sg-{slice_obj.id}"],
             )
-            ok = self.wait_for_active(server_id, project_id)
-            if not ok:
-                raise RuntimeError(f"VM {vm.name} failed to become ACTIVE")
-            ip = self.get_vm_ip(server_id, project_id)
+            try:
+                ok = self.wait_for_active(server_id, project_id)
+                if not ok:
+                    raise RuntimeError(f"VM {vm.name} failed to become ACTIVE")
+                ext_ip = None
+                if ext_net_id_for_vm:
+                    ext_ip = self.get_vm_ip(server_id, project_id, network_name="external")
 
-            ports = self.list_vm_ports(server_id, project_id)
-            net_to_port = {p.get("net_id"): p.get("port_id") for p in ports}
-            net_to_mac = {p.get("net_id"): p.get("mac_addr") for p in ports}
-            interfaces = [{
-                "type": "primary",
-                "network_id": net_id,
-                "port_id": net_to_port.get(net_id),
-                "mac_addr": net_to_mac.get(net_id),
-                "iface_name": "eth0",
-                "vlan_id": slice_obj.vlan_id,
-                "link_idx": None,
-                "peer_vm_name": None,
-            }]
-            for iface_idx, lnk in enumerate(vm_links, start=1):
-                link_net_id = link_network_by_idx.get(lnk["link_idx"])
-                interfaces.append({
-                    "type": "link",
-                    "network_id": link_net_id,
-                    "port_id": net_to_port.get(link_net_id) if link_net_id else None,
-                    "mac_addr": net_to_mac.get(link_net_id) if link_net_id else None,
-                    "iface_name": f"eth{iface_idx}",
-                    "vlan_id": lnk.get("vlan_id"),
-                    "link_idx": lnk["link_idx"],
-                    "peer_vm_name": lnk.get("peer_vm_name"),
-                })
-            return vm, server_id, ip, interfaces
+                ports = self.list_vm_ports(server_id, project_id)
+                net_to_port = {p.get("net_id"): p.get("port_id") for p in ports}
+                net_to_mac = {p.get("net_id"): p.get("mac_addr") for p in ports}
+                interfaces = []
+                for iface_idx, lnk in enumerate(vm_links):
+                    link_net_id = link_network_by_idx.get(lnk["link_idx"])
+                    interfaces.append({
+                        "type": "link",
+                        "network_id": link_net_id,
+                        "port_id": net_to_port.get(link_net_id) if link_net_id else None,
+                        "mac_addr": net_to_mac.get(link_net_id) if link_net_id else None,
+                        "iface_name": f"eth{iface_idx}",
+                        "vlan_id": lnk.get("vlan_id"),
+                        "link_idx": lnk["link_idx"],
+                        "peer_vm_name": lnk.get("peer_vm_name"),
+                    })
+                if ext_net_id_for_vm:
+                    interfaces.append({
+                        "type": "internet",
+                        "network_id": ext_net_id_for_vm,
+                        "port_id": net_to_port.get(ext_net_id_for_vm),
+                        "mac_addr": net_to_mac.get(ext_net_id_for_vm),
+                        "iface_name": f"eth{len(vm_links)}",
+                        "vlan_id": None,
+                        "link_idx": None,
+                        "peer_vm_name": None,
+                    })
+                return vm, server_id, ext_ip, interfaces
+            except Exception:
+                try:
+                    self.delete_vm(server_id, project_id)
+                except Exception as cleanup_err:
+                    logger.error("Failed to cleanup errored VM %s (server %s): %s",
+                                vm.name, server_id, cleanup_err)
+                raise
 
         results = {}
         if new_vms:
@@ -891,57 +998,143 @@ class OpenStackDriver:
                 futures = {ex.submit(_boot_vm, vm): vm for vm in new_vms}
                 for fut in as_completed(futures):
                     try:
-                        vm, server_id, ip, interfaces = fut.result()
+                        vm, server_id, ext_ip, interfaces = fut.result()
                         vm.openstack_server_id = server_id
-                        vm.ip_address = ip or ""
+                        vm.ip_address = ""
+                        vm.ip_address_external = ext_ip or ""
                         vm.interfaces = interfaces
                         results[vm.name] = server_id
                     except Exception as e:
                         errors.append(str(e))
                         logger.error("OS VM boot error (extend): %s", e)
 
+        network_ids = list(link_network_by_idx.values())
+        if fallback_net_id:
+            network_ids.append(fallback_net_id)
+
         return {
-            "network_ids": list(link_network_by_idx.values()),
+            "network_ids": network_ids,
             "server_ids": results,
             "anchor_interfaces": anchor_interfaces,
             "errors": errors,
         }
 
     def teardown_slice(self, slice_obj, vms) -> bool:
-        """Delete all OS resources for a slice."""
+        """
+        Delete all OS resources for a slice. Deleting the Keystone project
+        does NOT cascade-delete Neutron routers, security groups, floating
+        IPs, or ports still attached to them — Neutron just orphans those
+        resources under a project_id that no longer resolves to anything,
+        which is exactly the "still consuming resources after delete"
+        symptom. So every resource type is discovered by querying Neutron
+        by project scope (not just replayed from what the DB happened to
+        persist — that misses anything created outside the normal flow,
+        e.g. a VM that reached ERROR before this method existed) and
+        explicitly deleted in dependency order: floating IPs → servers →
+        router interfaces/routers → networks → security groups → project.
+        Returns True only if every step succeeded; any failure is logged
+        and turns the return value into False so the caller can surface a
+        real error instead of silently reporting "deleted".
+        """
         project_id = getattr(slice_obj, "openstack_project_id", None)
         if not project_id:
             logger.warning("No openstack_project_id on slice %s — skipping OS teardown",
                            slice_obj.id)
             return False
 
-        # Delete VMs
-        for vm in vms:
-            sid = getattr(vm, "openstack_server_id", None)
-            if sid:
-                try:
-                    self.delete_vm(sid, project_id)
-                except Exception as e:
-                    logger.warning("Delete VM %s: %s", sid, e)
+        ok = True
 
-        # Delete networks stored on slice
-        net_ids_json = getattr(slice_obj, "openstack_network_ids", None) or []
-        if isinstance(net_ids_json, str):
+        # Floating IPs first — a FIP still associated to a port blocks that
+        # port's owning server/router from tearing down cleanly.
+        try:
+            fips = self.list_floatingips_for_project(project_id)
+        except Exception as e:
+            logger.error("List floating IPs for project %s: %s", project_id, e)
+            fips, ok = [], False
+        for fip in fips:
+            try:
+                self.release_floating_ip(fip["id"])
+            except Exception as e:
+                logger.error("Delete floating IP %s: %s", fip.get("id"), e)
+                ok = False
+
+        # Servers — union of what the DB knows about and what Nova actually
+        # has under this project, so a VM that never made it into
+        # vm.openstack_server_id (e.g. it errored before that was set)
+        # still gets deleted.
+        server_ids = {getattr(vm, "openstack_server_id", None) for vm in vms}
+        server_ids.discard(None)
+        try:
+            for srv in self.list_servers_for_project(project_id):
+                server_ids.add(srv["id"])
+        except Exception as e:
+            logger.error("List servers for project %s: %s", project_id, e)
+            ok = False
+        for sid in server_ids:
+            try:
+                self.delete_vm(sid, project_id)
+            except Exception as e:
+                logger.error("Delete VM %s: %s", sid, e)
+                ok = False
+
+        # Routers — must be cleared of interfaces (handled inside
+        # delete_router) and gateway before Neutron allows deletion.
+        try:
+            routers = self.list_routers_for_project(project_id)
+        except Exception as e:
+            logger.error("List routers for project %s: %s", project_id, e)
+            routers, ok = [], False
+        for router in routers:
+            try:
+                self.delete_router(router["id"])
+            except Exception as e:
+                logger.error("Delete router %s: %s", router.get("id"), e)
+                ok = False
+
+        # Networks — union of DB-persisted IDs and whatever Neutron still
+        # has tagged to this project.
+        net_ids = set(getattr(slice_obj, "openstack_network_ids", None) or [])
+        if isinstance(getattr(slice_obj, "openstack_network_ids", None), str):
             import json
             try:
-                net_ids_json = json.loads(net_ids_json)
+                net_ids = set(json.loads(slice_obj.openstack_network_ids))
             except Exception:
-                net_ids_json = []
-        for nid in net_ids_json:
+                net_ids = set()
+        try:
+            for net in self.list_networks_for_project(project_id):
+                net_ids.add(net["id"])
+        except Exception as e:
+            logger.error("List networks for project %s: %s", project_id, e)
+            ok = False
+        for nid in net_ids:
             try:
                 self.delete_network(nid)
             except Exception as e:
-                logger.warning("Delete network %s: %s", nid, e)
+                logger.error("Delete network %s: %s", nid, e)
+                ok = False
 
-        # Delete project (cascades routers, SGs, ports)
+        # Security groups (skip "default", Neutron auto-creates one per
+        # project and refuses to delete it).
+        try:
+            sgs = self.list_security_groups_for_project(project_id)
+        except Exception as e:
+            logger.error("List security groups for project %s: %s", project_id, e)
+            sgs, ok = [], False
+        for sg in sgs:
+            if sg.get("name") == "default":
+                continue
+            try:
+                self.delete_security_group(sg["id"])
+            except Exception as e:
+                logger.error("Delete security group %s: %s", sg.get("id"), e)
+                ok = False
+
+        # Project last — Keystone will refuse (or silently leave orphans)
+        # if any of the above are still attached.
         try:
             self.delete_project(project_id)
         except Exception as e:
-            logger.warning("Delete project %s: %s", project_id, e)
+            logger.error("Delete project %s: %s", project_id, e)
+            ok = False
 
-        return True
+        return ok

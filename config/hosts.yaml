@@ -89,6 +89,19 @@ ssh:
   sudo: true
 
 # ---------------------------------------------------------------
+# VPN gateway — routes 10.60.4.0/24 (OpenStack external) to the
+# OpenStack headnode so VMs with internet enabled are directly
+# SSH-reachable over VPN. One-time setup via
+# scripts/setup_gateway_routing.py, not touched on every deploy.
+# ---------------------------------------------------------------
+gateway:
+  hostname: "gateway"
+  ip: "10.20.11.103"
+  port: 22
+  user: "ubuntu"
+  role: "gateway"
+
+# ---------------------------------------------------------------
 # VM defaults
 # ---------------------------------------------------------------
 vm_resources:
