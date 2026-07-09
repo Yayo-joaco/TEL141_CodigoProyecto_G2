@@ -654,7 +654,7 @@ class OpenStackDriver:
             if not image_id:
                 raise RuntimeError(f"Image '{image_name}' not found in Glance")
             flavor_id = self.get_or_create_flavor(
-                f"f-{vm.vcpus}c-{vm.ram_mb}m",
+                f"f-{vm.vcpus}c-{vm.ram_mb}m-{vm.disk_gb}g",
                 vm.vcpus, vm.ram_mb, vm.disk_gb,
             )
             host = force_hosts.get(vm.name)
@@ -826,7 +826,7 @@ class OpenStackDriver:
             if not image_id:
                 raise RuntimeError(f"Image '{image_name}' not found in Glance")
             flavor_id = self.get_or_create_flavor(
-                f"f-{vm.vcpus}c-{vm.ram_mb}m",
+                f"f-{vm.vcpus}c-{vm.ram_mb}m-{vm.disk_gb}g",
                 vm.vcpus, vm.ram_mb, vm.disk_gb,
             )
             host = force_hosts.get(vm.name)
