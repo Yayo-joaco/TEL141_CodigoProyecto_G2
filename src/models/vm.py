@@ -44,6 +44,7 @@ class VM:
     flavor_id: Optional[str] = None
     openstack_server_id: Optional[str] = None
     ip_address_external: Optional[str] = None
+    hypervisor_hostname: Optional[str] = None
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
 
     def __post_init__(self):
@@ -75,6 +76,7 @@ class VM:
             "image": self.image,
             "flavor_id": self.flavor_id,
             "openstack_server_id": self.openstack_server_id,
+            "hypervisor_hostname": self.hypervisor_hostname,
             "error_message": self.error_message,
             "created_at": self.created_at,
         }

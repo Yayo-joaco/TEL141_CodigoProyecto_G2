@@ -232,6 +232,7 @@ class VMRecord(Base):
     flavor_id = Column(String(64), nullable=True)
     openstack_server_id = Column(String(64), nullable=True)
     ip_address_external = Column(String(50), nullable=True)  # external/floating IP
+    hypervisor_hostname = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     def to_vm(self) -> VM:
@@ -259,6 +260,7 @@ class VMRecord(Base):
             flavor_id=getattr(self, 'flavor_id', None),
             openstack_server_id=getattr(self, 'openstack_server_id', None),
             ip_address_external=getattr(self, 'ip_address_external', None),
+            hypervisor_hostname=getattr(self, 'hypervisor_hostname', None),
             created_at=self.created_at.isoformat() if self.created_at else "",
         )
 
@@ -354,6 +356,7 @@ class DatabaseManager:
             ("vms", "flavor_id", "VARCHAR(64)"),
             ("vms", "openstack_server_id", "VARCHAR(64)"),
             ("vms", "ip_address_external", "VARCHAR(50)"),
+            ("vms", "hypervisor_hostname", "VARCHAR(255)"),
             ("users", "cluster_assignment", "VARCHAR(20) DEFAULT 'linux'"),
             ("flavors", "ram_mb", "INT"),
             ("vlan_pool", "cluster", "VARCHAR(20) DEFAULT 'linux'"),
@@ -596,6 +599,7 @@ class DatabaseManager:
                 flavor_id=getattr(vm, 'flavor_id', None),
                 openstack_server_id=getattr(vm, 'openstack_server_id', None),
                 ip_address_external=getattr(vm, 'ip_address_external', None),
+                hypervisor_hostname=getattr(vm, 'hypervisor_hostname', None),
             )
             session.merge(record)
             session.commit()

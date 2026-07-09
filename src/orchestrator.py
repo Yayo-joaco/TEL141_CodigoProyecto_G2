@@ -345,6 +345,7 @@ class Orchestrator:
         self.db.save_slice(slice_obj)
         for vm in vms:
             vm.status = VMStatus.ACTIVE
+            vm.hypervisor_hostname = force_hosts.get(vm.name)
             self.db.save_vm(vm)
 
         # Physical-switch VLAN pruning (R5.6) — OpenStack cluster's own
@@ -368,6 +369,7 @@ class Orchestrator:
                    new_disk_gb: int = None, user: User = None,
                    new_vms_image: dict = None,
                    new_vms_internet: List[int] = None,
+                   new_vms_flavor_id: str = None,
                    ext_topology: str = None,
                    anchor_vm_hint: str = None) -> dict:
         slice_obj = self.db.get_slice(slice_id)
@@ -382,6 +384,14 @@ class Orchestrator:
         new_vms_image = new_vms_image or {}
         new_vms_internet = new_vms_internet or []
 
+        # Explicit flavor choice for new VMs (same resolution pattern as
+        # api_create_slice) — falls back to the per-request vcpus/ram/disk
+        # overrides, then to the slice's original per-VM sizing.
+        flavor = self.db.get_flavor(new_vms_flavor_id) if new_vms_flavor_id else None
+        flavor_vcpus = flavor["vcpus"] if flavor else None
+        flavor_ram_mb = flavor["ramMb"] if flavor else None
+        flavor_disk_gb = flavor["diskGb"] if flavor else None
+
         extra_vms = []
         if add_vms > 0 and slice_obj:
             current_count = len([v for v in vms if v.status != VMStatus.DELETED])
@@ -390,11 +400,12 @@ class Orchestrator:
                 new_vm = VM(id="", slice_id=slice_id,
                             name=f"vm{vm_num}",
                             index=current_count + i,
-                            vcpus=new_vcpus or slice_obj.vcpus_per_vm,
-                            ram_mb=new_ram_mb or slice_obj.ram_mb_per_vm,
-                            disk_gb=new_disk_gb or slice_obj.disk_gb_per_vm,
+                            vcpus=new_vcpus or flavor_vcpus or slice_obj.vcpus_per_vm,
+                            ram_mb=new_ram_mb or flavor_ram_mb or slice_obj.ram_mb_per_vm,
+                            disk_gb=new_disk_gb or flavor_disk_gb or slice_obj.disk_gb_per_vm,
                             image=new_vms_image.get(str(vm_num)),
-                            enable_internet=(vm_num in new_vms_internet))
+                            enable_internet=(vm_num in new_vms_internet),
+                            flavor_id=new_vms_flavor_id)
                 extra_vms.append(new_vm)
 
             if infra == "openstack":
@@ -536,6 +547,7 @@ class Orchestrator:
 
         for vm in extra_vms:
             vm.status = VMStatus.ACTIVE if vm.name in result.get("server_ids", {}) else VMStatus.ERROR
+            vm.hypervisor_hostname = (force_hosts or {}).get(vm.name)
             self.db.save_vm(vm)
 
         # Extend R5.6 pruning to whatever hypervisors the new VMs landed on.
@@ -800,6 +812,7 @@ class Orchestrator:
                          new_disk_gb: int = None, user: User = None,
                          new_vms_image: dict = None,
                          new_vms_internet: List[int] = None,
+                         new_vms_flavor_id: str = None,
                          ext_topology: str = None,
                          anchor_vm_hint: str = None) -> str:
         return self.task_queue.enqueue(
@@ -807,7 +820,7 @@ class Orchestrator:
             self.edit_slice,
             slice_id, add_vms, remove_vm_ids,
             new_vcpus, new_ram_mb, new_disk_gb, user,
-            new_vms_image, new_vms_internet,
+            new_vms_image, new_vms_internet, new_vms_flavor_id,
             ext_topology, anchor_vm_hint,
         )
 

@@ -683,20 +683,28 @@ class OpenStackDriver:
             # net_id (list order isn't a documented guarantee).
             ports = self.list_vm_ports(server_id, project_id)
             net_to_port = {p.get("net_id"): p.get("port_id") for p in ports}
+            net_to_mac = {p.get("net_id"): p.get("mac_addr") for p in ports}
             interfaces = [{
                 "type": "primary",
                 "network_id": net_id,
                 "port_id": net_to_port.get(net_id),
+                "mac_addr": net_to_mac.get(net_id),
+                # OpenStack guest NIC naming isn't controllable from outside
+                # like the Linux driver's ens3/ens4 convention — eth0 is a
+                # positional best guess (primary NIC is always attached first).
+                "iface_name": "eth0",
                 "vlan_id": vlan_id,
                 "link_idx": None,
                 "peer_vm_name": None,
             }]
-            for lnk in vm_links:
+            for iface_idx, lnk in enumerate(vm_links, start=1):
                 link_net_id = link_network_by_idx.get(lnk["link_idx"])
                 interfaces.append({
                     "type": "link",
                     "network_id": link_net_id,
                     "port_id": net_to_port.get(link_net_id) if link_net_id else None,
+                    "mac_addr": net_to_mac.get(link_net_id) if link_net_id else None,
+                    "iface_name": f"eth{iface_idx}",
                     "vlan_id": lnk.get("vlan_id"),
                     "link_idx": lnk["link_idx"],
                     "peer_vm_name": lnk.get("peer_vm_name"),
@@ -851,20 +859,25 @@ class OpenStackDriver:
 
             ports = self.list_vm_ports(server_id, project_id)
             net_to_port = {p.get("net_id"): p.get("port_id") for p in ports}
+            net_to_mac = {p.get("net_id"): p.get("mac_addr") for p in ports}
             interfaces = [{
                 "type": "primary",
                 "network_id": net_id,
                 "port_id": net_to_port.get(net_id),
+                "mac_addr": net_to_mac.get(net_id),
+                "iface_name": "eth0",
                 "vlan_id": slice_obj.vlan_id,
                 "link_idx": None,
                 "peer_vm_name": None,
             }]
-            for lnk in vm_links:
+            for iface_idx, lnk in enumerate(vm_links, start=1):
                 link_net_id = link_network_by_idx.get(lnk["link_idx"])
                 interfaces.append({
                     "type": "link",
                     "network_id": link_net_id,
                     "port_id": net_to_port.get(link_net_id) if link_net_id else None,
+                    "mac_addr": net_to_mac.get(link_net_id) if link_net_id else None,
+                    "iface_name": f"eth{iface_idx}",
                     "vlan_id": lnk.get("vlan_id"),
                     "link_idx": lnk["link_idx"],
                     "peer_vm_name": lnk.get("peer_vm_name"),

@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import sys
+import urllib.parse
 import uuid
 import threading
 from functools import wraps
@@ -492,6 +493,18 @@ def console_vm(vm_id):
     return render_template("console.html", vm=vm.to_dict())
 
 
+@app.route("/os-console/<vm_id>")
+@login_required
+def os_console_vm(vm_id):
+    orch = get_orchestrator()
+    vm = orch.db.get_vm_by_id(vm_id)
+    if not vm:
+        flash("VM no encontrada", "error")
+        return redirect(url_for("index"))
+    token = request.args.get("token", "")
+    return render_template("os_console.html", vm=vm.to_dict(), token=token)
+
+
 @app.route("/delete/<slice_id>")
 @login_required
 def delete_slice(slice_id):
@@ -831,6 +844,87 @@ def ws_proxy(vm_id):
     return ''
 
 
+@app.route('/os-ws-proxy/<vm_id>')
+def os_ws_proxy(vm_id):
+    wsock = request.environ.get('wsgi.websocket')
+    if not wsock:
+        abort(400, 'WebSocket requerido')
+
+    orch = get_orchestrator()
+    vm = orch.db.get_vm_by_id(vm_id)
+    if not vm or not getattr(vm, "openstack_server_id", None):
+        abort(404)
+
+    token = request.args.get('token', '')
+    novnc_base = (orch._os_cfg or {}).get("endpoints", {}).get("novnc", "http://192.168.202.1:6080")
+    target_url = novnc_base.replace("http://", "ws://").replace("https://", "wss://") + f"/websockify?token={token}"
+    app.logger.info("OS WS Proxy START: %s (%s) -> %s", vm.name, vm_id, target_url)
+
+    try:
+        subprotocols = request.environ.get('HTTP_SEC_WEBSOCKET_PROTOCOL', '')
+        sub_list = [s.strip() for s in subprotocols.split(',')] if subprotocols else []
+        if not sub_list:
+            sub_list = ['binary', 'base64']
+        remote = ws_client.create_connection(
+            target_url, timeout=10, subprotocols=sub_list)
+    except Exception as e:
+        app.logger.error("OS WS Proxy cannot reach novncproxy %s: %s", target_url, e)
+        try:
+            wsock.close()
+        except Exception:
+            pass
+        return ''
+
+    app.logger.info("OS WS Proxy connected to novncproxy: %s", target_url)
+    counter = {'b2r': 0, 'r2b': 0}
+
+    def browser_to_remote():
+        try:
+            while True:
+                data = wsock.receive()
+                if data is None:
+                    break
+                counter['b2r'] += 1
+                if isinstance(data, str):
+                    data = data.encode('utf-8')
+                remote.send_binary(data)
+        except WebSocketError:
+            app.logger.debug("browser->novncproxy: WebSocket closed")
+        except Exception as e:
+            app.logger.debug("browser->novncproxy: %s", e)
+        finally:
+            try:
+                remote.close()
+            except Exception:
+                pass
+
+    def remote_to_browser():
+        try:
+            while True:
+                data = remote.recv()
+                if data is None:
+                    break
+                counter['r2b'] += 1
+                if isinstance(data, str):
+                    data = data.encode('utf-8')
+                wsock.send(data)
+        except WebSocketError:
+            app.logger.debug("novncproxy->browser: WebSocket closed")
+        except Exception as e:
+            app.logger.debug("novncproxy->browser: %s", e)
+        finally:
+            try:
+                wsock.close()
+            except Exception:
+                pass
+
+    g1 = gevent.spawn(browser_to_remote)
+    g2 = gevent.spawn(remote_to_browser)
+    gevent.joinall([g1, g2], timeout=600)
+    app.logger.info("OS WS Proxy END: %s (b2r=%d, r2b=%d)", vm.name, counter['b2r'], counter['r2b'])
+    return ''
+
+
 # =============================================================
 # REST API — helpers
 # =============================================================
@@ -893,12 +987,15 @@ def _vm_to_ui(v) -> dict:
         "cpu": d.get("vcpus", 1),
         "ram": round(d.get("ram_mb", 512) / 1024, 1),
         "disk": d.get("disk_gb", 2),
-        "host": d.get("host_ip", ""),
+        "host": d.get("host_ip") or d.get("hypervisor_hostname") or "",
         "image": d.get("image", ""),
         "flavorId": d.get("flavor_id") or "small",
         "vnc_port": d.get("vnc_port"),
         "vnc_ws_port": d.get("vnc_ws_port"),
         "openstack_server_id": d.get("openstack_server_id"),
+        "interfaces": d.get("interfaces") or [],
+        "enable_internet": d.get("enable_internet", False),
+        "mac_address": d.get("mac_address"),
     }
 
 
@@ -1058,6 +1155,7 @@ def api_edit_slice(slice_id):
         new_disk_gb=data.get("new_disk_gb"),
         new_vms_image=data.get("new_vms_image"),
         new_vms_internet=data.get("new_vms_internet"),
+        new_vms_flavor_id=data.get("new_vms_flavor_id"),
         ext_topology=data.get("ext_topology"),
         anchor_vm_hint=data.get("anchor_vm_hint"),
         user=user,
@@ -1099,14 +1197,20 @@ def api_vm_console(slice_id, vm_id):
     vm = orch.db.get_vm_by_id(vm_id)
     if not vm:
         return jsonify({"error": "VM not found"}), 404
-    # For OpenStack VMs, delegate to OpenStack driver
+    # For OpenStack VMs, delegate to OpenStack driver. The raw Nova console
+    # URL points at the OpenStack cluster's internal network (192.168.202.x),
+    # which the browser cannot reach directly — proxy it through this app
+    # server instead, same pattern as the Linux /ws-proxy route.
     if getattr(vm, "openstack_server_id", None):
         try:
             os_driver = orch._get_openstack_driver()
             slice_obj = orch.db.get_slice(slice_id)
             project_id = getattr(slice_obj, "openstack_project_id", None) if slice_obj else None
             url = os_driver.get_console_url(vm.openstack_server_id, project_id=project_id)
-            return jsonify({"url": url, "type": "novnc"})
+            if not url:
+                return jsonify({"error": "Console URL not available"}), 503
+            token = urllib.parse.parse_qs(urllib.parse.urlparse(url).query).get("token", [""])[0]
+            return jsonify({"url": f"/os-console/{vm_id}?token={token}", "type": "novnc"})
         except Exception as e:
             return jsonify({"error": str(e)}), 500
     # Linux VMs — return websockify info
