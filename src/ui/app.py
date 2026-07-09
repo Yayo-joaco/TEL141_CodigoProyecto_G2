@@ -180,14 +180,33 @@ def get_orchestrator():
                                  nat_iface=nat_iface)
         base_image = hosts_cfg.get("base_image", {}).get("path", "/home/ubuntu/cirros-base.img")
 
-        ovs2_ip = net_cfg.get("openstack", {}).get("ovs2", {}).get("ip") \
+        # OVS1 — Linux cluster's physical switch (R5.6 broadcast pruning)
+        ovs1_cfg = net_cfg.get("linux", {}).get("ovs1", {})
+        ovs1_ip = ovs1_cfg.get("ip") \
+                  or hosts_cfg.get("linux_cluster", {}).get("ovs", {}).get("ip")
+        ovs1_port_map = ovs1_cfg.get("ports") or None
+        ovs1_headnode = headnode.get("hostname", "server1")
+
+        # OVS2 — OpenStack cluster's physical switch (R5.6 broadcast pruning)
+        ovs2_cfg = net_cfg.get("openstack", {}).get("ovs2", {})
+        ovs2_ip = ovs2_cfg.get("ip") \
                   or hosts_cfg.get("openstack_cluster", {}).get("ovs", {}).get("ip")
+        ovs2_port_map = ovs2_cfg.get("ports") or None
+        ovs2_headnode = hosts_cfg.get("openstack_cluster", {}).get("headnode", {}) \
+                                  .get("hostname", "controller")
+
         _orchestrator = Orchestrator(
             hosts=hosts, driver=driver, network=network, db=db,
             base_image=base_image,
             openstack_cfg=os_cfg,
+            ovs1_ip=ovs1_ip,
+            ovs1_ssh_key=ssh_key,
+            ovs1_port_map=ovs1_port_map,
+            ovs1_headnode=ovs1_headnode,
             ovs2_ip=ovs2_ip,
             ovs2_ssh_key=ssh_key,
+            ovs2_port_map=ovs2_port_map,
+            ovs2_headnode=ovs2_headnode,
         )
         # Asegurar que la imagen de Ubuntu esté registrada
         img_list = db.list_images()
@@ -1046,6 +1065,13 @@ def api_edit_slice(slice_id):
         slice_id=slice_id,
         add_vms=int(data.get("add_vms", 0)),
         remove_vm_ids=data.get("remove_vm_ids"),
+        new_vcpus=data.get("new_vcpus"),
+        new_ram_mb=data.get("new_ram_mb"),
+        new_disk_gb=data.get("new_disk_gb"),
+        new_vms_image=data.get("new_vms_image"),
+        new_vms_internet=data.get("new_vms_internet"),
+        ext_topology=data.get("ext_topology"),
+        anchor_vm_hint=data.get("anchor_vm_hint"),
         user=user,
     )
     return jsonify({"ticketId": ticket_id}), 202

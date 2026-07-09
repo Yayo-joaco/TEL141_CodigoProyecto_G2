@@ -28,7 +28,10 @@ class Orchestrator:
                  network: NetworkManager, db: DatabaseManager,
                  base_image: str = "/home/ubuntu/cirros-base.img",
                  openstack_cfg: dict = None,
-                 ovs2_ip: str = None, ovs2_ssh_key: str = None):
+                 ovs1_ip: str = None, ovs1_ssh_key: str = None,
+                 ovs1_port_map: dict = None, ovs1_headnode: str = "server1",
+                 ovs2_ip: str = None, ovs2_ssh_key: str = None,
+                 ovs2_port_map: dict = None, ovs2_headnode: str = "controller"):
         self.hosts = hosts
         self.driver = driver
         self.network = network
@@ -40,8 +43,17 @@ class Orchestrator:
         self.task_queue = TaskQueue()
         self._os_cfg = openstack_cfg or {}
         self._os_driver = None          # lazy-loaded
+        # ovs1 = Linux cluster's physical switch (192.168.201.5)
+        self._ovs1_ip = ovs1_ip
+        self._ovs1_ssh_key = ovs1_ssh_key
+        self._ovs1_port_map = ovs1_port_map
+        self._ovs1_headnode = ovs1_headnode
+        self._ovs1 = None               # lazy-loaded
+        # ovs2 = OpenStack cluster's physical switch (192.168.202.5)
         self._ovs2_ip = ovs2_ip
         self._ovs2_ssh_key = ovs2_ssh_key
+        self._ovs2_port_map = ovs2_port_map
+        self._ovs2_headnode = ovs2_headnode
         self._ovs2 = None               # lazy-loaded
 
     # ---- Internal helpers ----
@@ -65,11 +77,24 @@ class Orchestrator:
             )
         return self._os_driver
 
+    def _get_ovs1(self):
+        if self._ovs1 is None and self._ovs1_ip and self._ovs1_ssh_key:
+            from .networking.ovs2_manager import OVS2Manager
+            self._ovs1 = OVS2Manager(self._ovs1_ip, self._ovs1_ssh_key,
+                                     port_map=self._ovs1_port_map,
+                                     headnode_hostname=self._ovs1_headnode)
+        return self._ovs1
+
     def _get_ovs2(self):
         if self._ovs2 is None and self._ovs2_ip and self._ovs2_ssh_key:
             from .networking.ovs2_manager import OVS2Manager
-            self._ovs2 = OVS2Manager(self._ovs2_ip, self._ovs2_ssh_key)
+            self._ovs2 = OVS2Manager(self._ovs2_ip, self._ovs2_ssh_key,
+                                     port_map=self._ovs2_port_map,
+                                     headnode_hostname=self._ovs2_headnode)
         return self._ovs2
+
+    def _get_ovs_for_infra(self, infra: str):
+        return self._get_ovs1() if infra == "linux" else self._get_ovs2()
 
     def _pick_infra(self, requested: str, user: User = None) -> str:
         """Resolve 'auto' → 'linux' or 'openstack' based on resource load."""
@@ -131,7 +156,7 @@ class Orchestrator:
         )
 
         # Auto-assign VLAN and subnet (R5.3 + R1C.3 + R1.5)
-        vlan_result = self.db.assign_vlan(slice_obj.id)
+        vlan_result = self.db.assign_vlan(slice_obj.id, cluster=infra)
         if not vlan_result["success"]:
             slice_obj.status = SliceStatus.ERROR
             slice_obj.error_message = vlan_result.get("error", "No VLAN available")
@@ -188,7 +213,9 @@ class Orchestrator:
             self.db.release_vlan(slice_obj.id)
             return {"success": False, "error": "Fallo en despliegue del slice"}
 
-        # OVS2 VLAN pruning (R5.6) — only for Linux cluster
+        # Physical-switch VLAN pruning (R5.6) — Linux cluster only here;
+        # OpenStack's own pruning (per-link VLANs + hypervisor hostnames)
+        # happens inside _create_slice_openstack() where placement info lives.
         if infra == "linux":
             worker_hosts = list({vm.host_ip for vm in created_vms if vm.host_ip})
             worker_names = []
@@ -199,9 +226,9 @@ class Orchestrator:
             vlan_ids = [slice_obj.vlan_id] if slice_obj.vlan_id else []
             if hasattr(slice_obj, "link_vlans") and slice_obj.link_vlans:
                 vlan_ids += [lv["vlan_id"] for lv in slice_obj.link_vlans if lv.get("vlan_id")]
-            ovs2 = self._get_ovs2()
-            if ovs2 and vlan_ids:
-                ovs2.add_slice_vlans(vlan_ids, worker_names)
+            ovs1 = self._get_ovs1()
+            if ovs1 and vlan_ids:
+                ovs1.add_slice_vlans(vlan_ids, worker_names)
 
         links = Topology.get_links(topo, num_vms)
         self.db.save_log(slice_obj.id, "orchestrator", "INFO",
@@ -360,8 +387,26 @@ class Orchestrator:
             vms, hypervisors, zone_id=slice_obj.zone_id
         )
 
+        # Per-link VLANs (R3.3/R5.1) — one distinct VLAN per topology edge,
+        # mirroring the Linux driver so arping between peer VMs surfaces the
+        # specific VLAN carrying that link's traffic.
+        links = Topology.get_links(slice_obj.topology, len(vms))
+        vm_names = [vm.name for vm in vms]
+        link_vlans = []
+        for link_idx, (a, b) in enumerate(links):
+            lv = self.db.assign_vlan_for_link(slice_obj.id, link_idx, cluster="openstack")
+            if lv:
+                link_vlans.append({
+                    "link_idx": link_idx,
+                    "vlan_id": lv,
+                    "vm_a_name": vm_names[a] if a < len(vm_names) else f"vm{a+1}",
+                    "vm_b_name": vm_names[b] if b < len(vm_names) else f"vm{b+1}",
+                })
+        vm_link_map = Topology.build_vm_link_map(vms, links, link_vlans)
+
         try:
-            result = os_drv.deploy_slice(slice_obj, vms, force_hosts=force_hosts)
+            result = os_drv.deploy_slice(slice_obj, vms, force_hosts=force_hosts,
+                                         vm_link_map=vm_link_map)
         except Exception as e:
             logger.error("OpenStack deploy_slice failed: %s", e)
             slice_obj.status = SliceStatus.ERROR
@@ -373,13 +418,30 @@ class Orchestrator:
             logger.warning("OS deploy had errors: %s", result["errors"])
 
         slice_obj.openstack_project_id = result.get("project_id", "")
-        net_ids = [result["network_id"]] if result.get("network_id") else []
-        slice_obj.openstack_network_ids = json.dumps(net_ids)
+        net_ids = result.get("all_network_ids") or (
+            [result["network_id"]] if result.get("network_id") else []
+        )
+        slice_obj.openstack_network_ids = net_ids
+        slice_obj.link_vlans = link_vlans if link_vlans else None
         slice_obj.status = SliceStatus.ACTIVE
         self.db.save_slice(slice_obj)
         for vm in vms:
             vm.status = VMStatus.ACTIVE
             self.db.save_vm(vm)
+
+        # Physical-switch VLAN pruning (R5.6) — OpenStack cluster's own
+        # switch (OVS2), scoped to the hypervisor hostnames actually used.
+        ovs2 = self._get_ovs2()
+        if ovs2 and link_vlans:
+            worker_names = list(set(force_hosts.values()))
+            vlan_ids = [lv["vlan_id"] for lv in link_vlans if lv.get("vlan_id")]
+            if slice_obj.vlan_id:
+                vlan_ids.append(slice_obj.vlan_id)
+            if vlan_ids and worker_names:
+                ovs2.add_slice_vlans(vlan_ids, worker_names)
+
+        logger.info("OpenStack slice '%s' created with %d VMs, %d links",
+                    slice_obj.name, len(vms), len(link_vlans))
         return vms
 
     def edit_slice(self, slice_id: str, add_vms: int = 0,
@@ -390,6 +452,9 @@ class Orchestrator:
                    new_vms_internet: List[int] = None,
                    ext_topology: str = None,
                    anchor_vm_hint: str = None) -> dict:
+        slice_obj = self.db.get_slice(slice_id)
+        infra = getattr(slice_obj, "infrastructure_target", "linux") if slice_obj else "linux"
+
         vms = self.db.get_vms_for_slice(slice_id)
         if remove_vm_ids:
             for vm in vms:
@@ -400,21 +465,33 @@ class Orchestrator:
         new_vms_internet = new_vms_internet or []
 
         extra_vms = []
-        if add_vms > 0:
-            slice_obj = self.db.get_slice(slice_id)
-            if slice_obj:
-                current_count = len([v for v in vms if v.status != VMStatus.DELETED])
-                for i in range(add_vms):
-                    vm_num = current_count + i + 1
-                    new_vm = VM(id="", slice_id=slice_id,
-                                name=f"vm{vm_num}",
-                                index=current_count + i,
-                                vcpus=new_vcpus or slice_obj.vcpus_per_vm,
-                                ram_mb=new_ram_mb or slice_obj.ram_mb_per_vm,
-                                disk_gb=new_disk_gb or slice_obj.disk_gb_per_vm,
-                                image=new_vms_image.get(str(vm_num)),
-                                enable_internet=(vm_num in new_vms_internet))
-                    extra_vms.append(new_vm)
+        if add_vms > 0 and slice_obj:
+            current_count = len([v for v in vms if v.status != VMStatus.DELETED])
+            for i in range(add_vms):
+                vm_num = current_count + i + 1
+                new_vm = VM(id="", slice_id=slice_id,
+                            name=f"vm{vm_num}",
+                            index=current_count + i,
+                            vcpus=new_vcpus or slice_obj.vcpus_per_vm,
+                            ram_mb=new_ram_mb or slice_obj.ram_mb_per_vm,
+                            disk_gb=new_disk_gb or slice_obj.disk_gb_per_vm,
+                            image=new_vms_image.get(str(vm_num)),
+                            enable_internet=(vm_num in new_vms_internet))
+                extra_vms.append(new_vm)
+
+            if infra == "openstack":
+                try:
+                    os_drv = self._get_openstack_driver()
+                    hypervisors = os_drv.get_hypervisor_stats()
+                except Exception as e:
+                    logger.error("Cannot fetch hypervisor stats for edit: %s", e)
+                    hypervisors = []
+                force_hosts = self._place_vms_openstack(
+                    extra_vms, hypervisors, zone_id=slice_obj.zone_id
+                )
+                for vm in extra_vms:
+                    vm.host_ip = None  # OpenStack VMs don't use SSH-cluster host_ip
+            else:
                 plan = self.placement_engine.place_vms(slice_id, extra_vms)
                 if not plan.success:
                     return {"success": False, "error": plan.error_message}
@@ -427,12 +504,129 @@ class Orchestrator:
                     vm.vnc_ws_port = ports["vnc_ws_port"]
                     allocated_ports.setdefault(vm.host_ip, set()).add(ports["vnc_port"])
 
+        if infra == "openstack":
+            return self._edit_slice_openstack(
+                slice_obj, vms, extra_vms, add_vms,
+                remove_vm_ids=remove_vm_ids,
+                force_hosts=force_hosts if add_vms > 0 else {},
+                ext_topology=ext_topology,
+                anchor_vm_hint=anchor_vm_hint,
+            )
+
         success, msg, info = self.slice_manager.edit_slice(
             slice_id, add_vms, remove_vm_ids, new_vcpus, new_ram_mb, new_disk_gb,
             pre_placed_vms=extra_vms,
             ext_topology=ext_topology,
             anchor_vm_hint=anchor_vm_hint)
         return {"success": success, "message": msg, "slice": info}
+
+    def _edit_slice_openstack(self, slice_obj: Slice, vms: List[VM],
+                              extra_vms: List[VM], add_vms: int,
+                              remove_vm_ids: List[str] = None,
+                              force_hosts: Dict[str, str] = None,
+                              ext_topology: str = None,
+                              anchor_vm_hint: str = None) -> dict:
+        """
+        OpenStack edit path: remove VMs via Nova delete, then (optionally)
+        add VMs forming a second topology anchored on an existing VM —
+        using Nova hot-attach (os-interface) for the anchor instead of the
+        Linux driver's kill+rebuild restart.
+        """
+        os_drv = self._get_openstack_driver()
+        project_id = getattr(slice_obj, "openstack_project_id", None)
+        remove_vm_ids = remove_vm_ids or []
+
+        if remove_vm_ids and project_id:
+            for vm in vms:
+                if vm.id in remove_vm_ids and getattr(vm, "openstack_server_id", None):
+                    try:
+                        os_drv.delete_vm(vm.openstack_server_id, project_id)
+                    except Exception as e:
+                        logger.error("OS delete_vm failed for %s: %s", vm.name, e)
+                    self.db.delete_vm_record(vm.id)
+
+        active_vms = [vm for vm in vms if vm.id not in remove_vm_ids
+                     and vm.status != VMStatus.DELETED]
+
+        if not (add_vms > 0 and extra_vms):
+            slice_obj.num_vms = len(active_vms)
+            self.db.save_slice(slice_obj)
+            return {"success": True, "message": f"Slice editado: {len(active_vms)} VMs total",
+                   "slice": self.get_slice(slice_obj.id)}
+
+        all_vms_after = active_vms + extra_vms
+        ext_topo_type = TopologyType(ext_topology) if ext_topology else TopologyType.LINEAL
+        anchor_idx = next(
+            (i for i, vm in enumerate(all_vms_after) if vm.name == anchor_vm_hint),
+            len(active_vms) - 1
+        )
+        ext_links_raw = Topology.get_links(ext_topo_type, len(extra_vms) + 1)
+        base_link_count = len(slice_obj.link_vlans or [])
+        ext_link_vlans = []
+        for li, (a, b) in enumerate(ext_links_raw):
+            real_a = anchor_idx if a == 0 else len(active_vms) + a - 1
+            real_b = anchor_idx if b == 0 else len(active_vms) + b - 1
+            lv = self.db.assign_vlan_for_link(slice_obj.id, base_link_count + li, cluster="openstack")
+            if lv:
+                ext_link_vlans.append({
+                    "link_idx": base_link_count + li,
+                    "vlan_id": lv,
+                    "vm_a_name": all_vms_after[real_a].name if real_a < len(all_vms_after) else "",
+                    "vm_b_name": all_vms_after[real_b].name if real_b < len(all_vms_after) else "",
+                })
+
+        ext_links_real = [
+            (anchor_idx if a == 0 else len(active_vms) + a - 1,
+             anchor_idx if b == 0 else len(active_vms) + b - 1)
+            for a, b in ext_links_raw
+        ]
+        ext_vm_link_map = Topology.build_vm_link_map(all_vms_after, ext_links_real, ext_link_vlans)
+
+        anchor_vm_obj = all_vms_after[anchor_idx]
+        anchor_new_links = ext_vm_link_map.get(anchor_vm_obj.name, [])
+        new_vm_link_map = {vm.name: ext_vm_link_map.get(vm.name, []) for vm in extra_vms}
+
+        try:
+            result = os_drv.extend_slice(
+                slice_obj, extra_vms, force_hosts=force_hosts,
+                new_vm_link_map=new_vm_link_map,
+                anchor_server_id=getattr(anchor_vm_obj, "openstack_server_id", None),
+                anchor_link_map=anchor_new_links,
+            )
+        except Exception as e:
+            logger.error("OS extend_slice failed: %s", e)
+            return {"success": False, "error": str(e)}
+
+        if result.get("errors"):
+            logger.warning("OS extend_slice had errors: %s", result["errors"])
+
+        if anchor_vm_obj.interfaces is None:
+            anchor_vm_obj.interfaces = []
+        anchor_vm_obj.interfaces.extend(result.get("anchor_interfaces", []))
+        self.db.save_vm(anchor_vm_obj)
+
+        existing_net_ids = getattr(slice_obj, "openstack_network_ids", None) or []
+        slice_obj.openstack_network_ids = list(existing_net_ids) + result.get("network_ids", [])
+        slice_obj.link_vlans = (slice_obj.link_vlans or []) + ext_link_vlans
+        slice_obj.ext_topology = ext_topology or 'lineal'
+        slice_obj.anchor_vm_name = anchor_vm_hint or (active_vms[-1].name if active_vms else None)
+        slice_obj.base_num_vms = len(active_vms)
+        slice_obj.num_vms = len(active_vms) + len(extra_vms)
+        self.db.save_slice(slice_obj)
+
+        for vm in extra_vms:
+            vm.status = VMStatus.ACTIVE if vm.name in result.get("server_ids", {}) else VMStatus.ERROR
+            self.db.save_vm(vm)
+
+        # Extend R5.6 pruning to whatever hypervisors the new VMs landed on.
+        ovs2 = self._get_ovs2()
+        new_vlan_ids = [lv["vlan_id"] for lv in ext_link_vlans if lv.get("vlan_id")]
+        if ovs2 and new_vlan_ids and force_hosts:
+            ovs2.add_slice_vlans(new_vlan_ids, list(set(force_hosts.values())))
+
+        return {"success": True,
+               "message": f"Slice editado: {len(active_vms) + len(extra_vms)} VMs total",
+               "slice": self.get_slice(slice_obj.id)}
 
     def delete_slice(self, slice_id: str, user: User = None) -> dict:
         slice_obj = self.db.get_slice(slice_id)
@@ -450,6 +644,20 @@ class Orchestrator:
                 os_drv.teardown_slice(slice_obj, vms)
             except Exception as e:
                 logger.error("OS teardown failed for slice %s: %s", slice_id, e)
+
+            # OVS2 VLAN pruning cleanup (OpenStack cluster physical switch).
+            # We don't persist per-VM hypervisor hostnames, so prune across
+            # every known compute port — removing a VLAN a port never had
+            # is a no-op (set difference), so this is safe.
+            ovs2 = self._get_ovs2()
+            if ovs2 and slice_obj:
+                vlan_ids = [slice_obj.vlan_id] if slice_obj.vlan_id else []
+                if hasattr(slice_obj, "link_vlans") and slice_obj.link_vlans:
+                    vlan_ids += [lv["vlan_id"] for lv in slice_obj.link_vlans if lv.get("vlan_id")]
+                if vlan_ids:
+                    all_hostnames = list(ovs2.port_map.keys())
+                    ovs2.remove_slice_vlans(vlan_ids, all_hostnames)
+
             slice_obj.status = SliceStatus.DELETED
             self.db.save_slice(slice_obj)
             for vm in vms:
@@ -457,7 +665,7 @@ class Orchestrator:
                 self.db.save_vm(vm)
             success = True
         else:
-            # OVS2 VLAN pruning cleanup
+            # OVS1 VLAN pruning cleanup (Linux cluster physical switch)
             if slice_obj:
                 worker_names = []
                 for vm in vms:
@@ -467,9 +675,9 @@ class Orchestrator:
                 vlan_ids = [slice_obj.vlan_id] if slice_obj.vlan_id else []
                 if hasattr(slice_obj, "link_vlans") and slice_obj.link_vlans:
                     vlan_ids += [lv["vlan_id"] for lv in slice_obj.link_vlans if lv.get("vlan_id")]
-                ovs2 = self._get_ovs2()
-                if ovs2 and vlan_ids:
-                    ovs2.remove_slice_vlans(vlan_ids, list(set(worker_names)))
+                ovs1 = self._get_ovs1()
+                if ovs1 and vlan_ids:
+                    ovs1.remove_slice_vlans(vlan_ids, list(set(worker_names)))
             success = self.slice_manager.delete_slice(slice_id)
 
         self.db.release_vlan(slice_id)

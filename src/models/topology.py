@@ -65,6 +65,37 @@ class Topology:
         return [(0, i) for i in range(1, n)]
 
     @staticmethod
+    def build_vm_link_map(vms, links: List[Tuple[int, int]],
+                          link_vlans: List[dict]) -> dict:
+        """
+        Returns {vm_name: [{link_idx, vlan_id, peer_vm_name}]} for each VM.
+        Each entry represents one link interface the VM needs (one per
+        topology edge it participates in) — shared by the Linux driver
+        (per-link taps) and the OpenStack driver (per-link Neutron networks).
+        """
+        vm_names = [vm.name for vm in vms]
+        vlan_by_link = {lv["link_idx"]: lv["vlan_id"] for lv in link_vlans}
+        result = {vm.name: [] for vm in vms}
+        # Use actual link_idx from link_vlans (not enumerate) so edit_slice offsets work
+        link_indices = [lv["link_idx"] for lv in link_vlans]
+        for i, (a, b) in enumerate(links):
+            if a >= len(vm_names) or b >= len(vm_names):
+                continue
+            actual_link_idx = link_indices[i] if i < len(link_indices) else i
+            vlan_id = vlan_by_link.get(actual_link_idx)
+            result[vm_names[a]].append({
+                "link_idx": actual_link_idx,
+                "vlan_id": vlan_id,
+                "peer_vm_name": vm_names[b],
+            })
+            result[vm_names[b]].append({
+                "link_idx": actual_link_idx,
+                "vlan_id": vlan_id,
+                "peer_vm_name": vm_names[a],
+            })
+        return result
+
+    @staticmethod
     def get_topology_name(topology: TopologyType) -> str:
         names = {
             TopologyType.LINEAL: "Lineal",

@@ -20,6 +20,17 @@ linux:
     enabled: true
     nat_interface: "ens3"
 
+  # OVS1 (192.168.201.5) trunk port → node mapping
+  # Used by OVS2Manager (generic physical-switch pruning) for R5.6
+  ovs1:
+    ip: "192.168.201.5"
+    ssh_user: "ubuntu"
+    ports:
+      server1:  "ens4"   # headnode  192.168.201.1
+      server2:  "ens5"   # worker    192.168.201.2
+      server3:  "ens6"   # worker    192.168.201.3
+      server4:  "ens7"   # worker    192.168.201.4
+
 # ---------------------------------------------------------------
 # OpenStack Cluster networking
 # ---------------------------------------------------------------

@@ -313,6 +313,7 @@ class VLANPoolRecord(Base):
     slice_id = Column(String(64), nullable=True)
     subnet = Column(String(50), nullable=True)
     in_use = Column(Integer, default=0)
+    cluster = Column(String(20), default="linux")   # linux | openstack — separate pools per network.yaml ranges
     assigned_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -354,6 +355,7 @@ class DatabaseManager:
             ("vms", "ip_address_external", "VARCHAR(50)"),
             ("users", "cluster_assignment", "VARCHAR(20) DEFAULT 'linux'"),
             ("flavors", "ram_mb", "INT"),
+            ("vlan_pool", "cluster", "VARCHAR(20) DEFAULT 'linux'"),
         ]
         with self.engine.connect() as conn:
             for table, col, col_type in migrations:
@@ -372,24 +374,36 @@ class DatabaseManager:
             except Exception:
                 pass
 
+    # Linux cluster VLAN range (primary + per-link VLANs), per config/network.yaml
+    _LINUX_VLAN_RANGE = range(300, 400)
+    # OpenStack cluster VLAN range (primary + per-link VLANs), within network.yaml's
+    # openstack.vlan_pool_start/end (11-900) but disjoint from the Linux range and
+    # from vlan_reserved=[14] (external/br-provider network).
+    _OPENSTACK_VLAN_RANGE = range(400, 900)
+
     def _populate_vlan_pool(self):
-        """Ensure VLAN pool has data (100 VLANs: 300-399)."""
+        """Ensure VLAN pool has data: Linux (300-399) and OpenStack (400-899) ranges."""
         session = self.Session()
         try:
-            count = session.query(VLANPoolRecord).count()
-            if count == 0:
-                for vlan_id in range(300, 400):
-                    session.add(VLANPoolRecord(vlan_id=vlan_id, in_use=0))
+            existing = {r.vlan_id for r in session.query(VLANPoolRecord).all()}
+            # Backfill cluster on any legacy rows that predate the column
+            legacy = session.query(VLANPoolRecord).filter(
+                VLANPoolRecord.cluster.is_(None)
+            ).all()
+            for r in legacy:
+                r.cluster = "openstack" if r.vlan_id in self._OPENSTACK_VLAN_RANGE else "linux"
+            added = 0
+            for vlan_id in self._LINUX_VLAN_RANGE:
+                if vlan_id not in existing:
+                    session.add(VLANPoolRecord(vlan_id=vlan_id, in_use=0, cluster="linux"))
+                    added += 1
+            for vlan_id in self._OPENSTACK_VLAN_RANGE:
+                if vlan_id not in existing:
+                    session.add(VLANPoolRecord(vlan_id=vlan_id, in_use=0, cluster="openstack"))
+                    added += 1
+            if added or legacy:
                 session.commit()
-                logger.info("VLAN pool populated: VLANs 300-399")
-            elif count < 100:
-                # Expand existing pool
-                existing = {r.vlan_id for r in session.query(VLANPoolRecord).all()}
-                for vlan_id in range(300, 400):
-                    if vlan_id not in existing:
-                        session.add(VLANPoolRecord(vlan_id=vlan_id, in_use=0))
-                session.commit()
-                logger.info("VLAN pool expanded to VLANs 300-399")
+                logger.info("VLAN pool ensured: Linux 300-399, OpenStack 400-899 (%d added)", added)
         except Exception as e:
             session.rollback()
             logger.warning("VLAN pool population skipped: %s", e)
@@ -887,18 +901,22 @@ class DatabaseManager:
 
     # ---- VLAN pool operations (auto-assign, no collision) ----
 
-    def assign_vlan(self, slice_id: str) -> dict:
-        """Auto-assign next free VLAN + /28 subnet from 10.60.3.0/24 (G2)."""
+    def assign_vlan(self, slice_id: str, cluster: str = "linux") -> dict:
+        """Auto-assign next free VLAN from the given cluster's pool.
+        Linux gets a /28 subnet carved from 10.60.3.0/24 (G2); OpenStack's
+        per-slice subnet is assigned separately (Neutron subnet CIDR)."""
         session = self.get_session()
         try:
-            record = session.query(VLANPoolRecord).filter_by(in_use=0).order_by(
-                VLANPoolRecord.vlan_id
-            ).first()
+            record = session.query(VLANPoolRecord).filter_by(
+                in_use=0, cluster=cluster
+            ).order_by(VLANPoolRecord.vlan_id).first()
             if not record:
-                return {"success": False, "error": "No hay VLANs disponibles en el pool"}
+                return {"success": False, "error": f"No hay VLANs disponibles en el pool ({cluster})"}
 
-            used = session.query(VLANPoolRecord).filter_by(in_use=1).count()
-            subnet = f"10.60.3.{used * 16}/28"
+            subnet = None
+            if cluster == "linux":
+                used = session.query(VLANPoolRecord).filter_by(in_use=1, cluster="linux").count()
+                subnet = f"10.60.3.{used * 16}/28"
 
             record.in_use = 1
             record.slice_id = slice_id
@@ -916,13 +934,14 @@ class DatabaseManager:
         finally:
             session.close()
 
-    def assign_vlan_for_link(self, slice_id: str, link_idx: int) -> Optional[int]:
+    def assign_vlan_for_link(self, slice_id: str, link_idx: int,
+                             cluster: str = "linux") -> Optional[int]:
         """Assign a VLAN for a specific link (no subnet needed)."""
         session = self.get_session()
         try:
-            record = session.query(VLANPoolRecord).filter_by(in_use=0).order_by(
-                VLANPoolRecord.vlan_id
-            ).first()
+            record = session.query(VLANPoolRecord).filter_by(
+                in_use=0, cluster=cluster
+            ).order_by(VLANPoolRecord.vlan_id).first()
             if not record:
                 return None
             record.in_use = 1
