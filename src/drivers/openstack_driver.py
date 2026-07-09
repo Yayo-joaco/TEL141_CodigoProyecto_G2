@@ -761,6 +761,7 @@ class OpenStackDriver:
                 ports = self.list_vm_ports(server_id, project_id)
                 net_to_port = {p.get("net_id"): p.get("port_id") for p in ports}
                 net_to_mac = {p.get("net_id"): p.get("mac_addr") for p in ports}
+                is_ubuntu = (vm.image or "").lower() == "ubuntu"
                 interfaces = []
                 for iface_idx, lnk in enumerate(vm_links):
                     link_net_id = link_network_by_idx.get(lnk["link_idx"])
@@ -769,7 +770,7 @@ class OpenStackDriver:
                         "network_id": link_net_id,
                         "port_id": net_to_port.get(link_net_id) if link_net_id else None,
                         "mac_addr": net_to_mac.get(link_net_id) if link_net_id else None,
-                        "iface_name": f"eth{iface_idx}",
+                        "iface_name": f"ens{iface_idx + 3}" if is_ubuntu else f"eth{iface_idx}",
                         "vlan_id": lnk.get("vlan_id"),
                         "link_idx": lnk["link_idx"],
                         "peer_vm_name": lnk.get("peer_vm_name"),
@@ -780,7 +781,7 @@ class OpenStackDriver:
                         "network_id": ext_net_id_for_vm,
                         "port_id": net_to_port.get(ext_net_id_for_vm),
                         "mac_addr": net_to_mac.get(ext_net_id_for_vm),
-                        "iface_name": f"eth{len(vm_links)}",
+                        "iface_name": f"ens{len(vm_links) + 3}" if is_ubuntu else f"eth{len(vm_links)}",
                         "vlan_id": None,
                         "link_idx": None,
                         "peer_vm_name": None,
@@ -958,6 +959,7 @@ class OpenStackDriver:
                 ports = self.list_vm_ports(server_id, project_id)
                 net_to_port = {p.get("net_id"): p.get("port_id") for p in ports}
                 net_to_mac = {p.get("net_id"): p.get("mac_addr") for p in ports}
+                is_ubuntu = (vm.image or "").lower() == "ubuntu"
                 interfaces = []
                 for iface_idx, lnk in enumerate(vm_links):
                     link_net_id = link_network_by_idx.get(lnk["link_idx"])
@@ -966,7 +968,7 @@ class OpenStackDriver:
                         "network_id": link_net_id,
                         "port_id": net_to_port.get(link_net_id) if link_net_id else None,
                         "mac_addr": net_to_mac.get(link_net_id) if link_net_id else None,
-                        "iface_name": f"eth{iface_idx}",
+                        "iface_name": f"ens{iface_idx + 3}" if is_ubuntu else f"eth{iface_idx}",
                         "vlan_id": lnk.get("vlan_id"),
                         "link_idx": lnk["link_idx"],
                         "peer_vm_name": lnk.get("peer_vm_name"),
@@ -977,7 +979,7 @@ class OpenStackDriver:
                         "network_id": ext_net_id_for_vm,
                         "port_id": net_to_port.get(ext_net_id_for_vm),
                         "mac_addr": net_to_mac.get(ext_net_id_for_vm),
-                        "iface_name": f"eth{len(vm_links)}",
+                        "iface_name": f"ens{len(vm_links) + 3}" if is_ubuntu else f"eth{len(vm_links)}",
                         "vlan_id": None,
                         "link_idx": None,
                         "peer_vm_name": None,
