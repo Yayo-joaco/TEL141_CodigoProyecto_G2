@@ -208,18 +208,6 @@ def get_orchestrator():
             ovs2_port_map=ovs2_port_map,
             ovs2_headnode=ovs2_headnode,
         )
-        # Asegurar que la imagen de Ubuntu esté registrada
-        img_list = db.list_images()
-        ubuntu_exists = any(i["name"] == "ubuntu" for i in img_list)
-        if not ubuntu_exists:
-            db.save_image("ubuntu", "ubuntu-server.qcow2",
-                         "/home/ubuntu/ubuntu-server.qcow2",
-                         "qcow2", 3, "admin")
-        cirros_exists = any(i["name"] == "cirros" for i in img_list)
-        if not cirros_exists:
-            db.save_image("cirros", "cirros-base.img",
-                         base_image,
-                         "qcow2", 1, "admin")
         # Cargar recursos reales de los servidores al iniciar
         result = _orchestrator.refresh_hosts()
         logger.info("Hosts refreshed: %d OK, %d failed",
@@ -1559,7 +1547,10 @@ def api_list_zones():
     if err:
         return err
     orch = get_orchestrator()
-    zones = {z["id"]: dict(z, cpuUsed=0, ramUsed=0, servers=0, serversOnline=0) for z in orch.db.list_zones()}
+    zones = {
+        z["id"]: dict(z, cpuTotal=0, ramTotal=0, cpuUsed=0, ramUsed=0, servers=0, serversOnline=0)
+        for z in orch.db.list_zones()
+    }
 
     # Enrich with live Linux worker data
     try:
@@ -1569,8 +1560,8 @@ def api_list_zones():
             zid = "AZ-Compute-1"
             if zid in zones:
                 zones[zid]["servers"] += 1
-                zones[zid]["cpuTotal"] = max(zones[zid].get("cpuTotal", 0),
-                                             zones[zid].get("cpuTotal", 0))
+                zones[zid]["cpuTotal"] += h.get("total_vcpus", 0)
+                zones[zid]["ramTotal"] += round(h.get("total_ram_mb", 0) / 1024)
                 zones[zid]["cpuUsed"] += h.get("total_vcpus", 0) - h.get("available_vcpus", 0)
                 zones[zid]["ramUsed"] += round((h.get("total_ram_mb", 0) - h.get("available_ram_mb", 0)) / 1024)
                 if h.get("is_active"):

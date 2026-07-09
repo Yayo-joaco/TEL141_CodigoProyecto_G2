@@ -4,7 +4,6 @@
 
 import json
 import logging
-import time
 from typing import List, Optional, Tuple, Dict
 
 from .models.slice import Slice, SliceStatus, TopologyType
@@ -96,17 +95,6 @@ class Orchestrator:
     def _get_ovs_for_infra(self, infra: str):
         return self._get_ovs1() if infra == "linux" else self._get_ovs2()
 
-    def _pick_infra(self, requested: str, user: User = None) -> str:
-        """Resolve 'auto' → 'linux' or 'openstack' based on resource load."""
-        if requested == "auto":
-            # If OpenStack is configured, prefer it when Linux workers are heavily loaded
-            workers = [h for h in self.hosts if h.is_active]
-            if not workers:
-                return "openstack" if self._os_cfg else "linux"
-            avg_free_ram = sum(h.available_ram_mb for h in workers) / len(workers)
-            return "openstack" if avg_free_ram < 512 and self._os_cfg else "linux"
-        return requested or "linux"
-
     # ---- Authentication ----
 
     def login(self, username: str, password: str, ip: str = "") -> Tuple[bool, Optional[dict]]:
@@ -143,7 +131,16 @@ class Orchestrator:
         if num_vms < 1:
             return {"success": False, "error": "Se necesita al menos 1 VM"}
 
-        infra = self._pick_infra(infrastructure_target or "linux")
+        infra = infrastructure_target or "linux"
+
+        if zone_id:
+            zone = self.db.get_zone(zone_id)
+            if not zone:
+                return {"success": False, "error": f"Zona '{zone_id}' no existe"}
+            if zone.get("cluster") != infra:
+                return {"success": False,
+                        "error": f"Zona '{zone_id}' pertenece al cluster '{zone.get('cluster')}', "
+                                 f"no a '{infra}'"}
 
         slice_obj = Slice(
             id="", name=name, topology=topo, num_vms=num_vms,
@@ -185,7 +182,7 @@ class Orchestrator:
 
         # Linux placement (skipped for OpenStack — placement done inside _create_slice_openstack)
         if infra != "openstack":
-            plan = self.placement_engine.place_vms(slice_obj.id, vms)
+            plan = self.placement_engine.place_vms(slice_obj.id, vms, zone_id=zone_id)
             if not plan.success:
                 slice_obj.status = SliceStatus.ERROR
                 slice_obj.error_message = plan.error_message
@@ -248,126 +245,16 @@ class Orchestrator:
     # OpenStack multi-criteria placement
     # ------------------------------------------------------------------
 
-    # Scoring weights (must sum to 1.0)
-    _ALPHA = 0.50   # RAM utilization weight — hard resource, no overcommit
-    _BETA  = 0.30   # CPU utilization weight — soft, allows overcommit
-    _GAMMA = 0.20   # batch-concentration penalty — discourages piling VMs on one host
-    _CPU_OVERCOMMIT = 2.0    # CPUs can be shared; dynamic VMs rarely use 100% simultaneously
-    _PLACEMENT_TIMEOUT = 30  # seconds — cap execution for large slices (R4.6)
-
     def _place_vms_openstack(self, vms: List[VM], hypervisors: List[dict],
-                              zone_id: str = None) -> Dict[str, str]:
+                              zone_id: str = None) -> Tuple[Dict[str, str], Optional[str]]:
         """
-        Objective: minimise max weighted utilisation after placement.
-
-        Per-host score (lower = better):
-            α * (ram_after / ram_total)
-          + β * (cpu_after / (cpu_total * CPU_OVERCOMMIT))
-          + γ * (vms_assigned_this_batch / total_vms)
-
-        Virtual state tracks VMs already assigned in this batch but not yet
-        booted — Nova stats don't reflect them yet (R4.4).
-        The whole slice is placed as a unit before any VM boots (R4.5).
-        RAM is a hard constraint; CPU allows overcommit (R4.3).
+        Delegates to PlacementEngine.score_hosts_for_vms — the same
+        multi-criteria scoring algorithm used for the Linux cluster,
+        applied here to Nova hypervisor stats instead of Host objects.
+        Returns (force_hosts, error); error is set (and force_hosts empty)
+        if any VM can't be placed or the batch times out.
         """
-        deadline = time.time() + self._PLACEMENT_TIMEOUT
-
-        candidates = [
-            h for h in hypervisors
-            if h.get("state") == "up"
-            and h.get("status") == "enabled"
-            and h.get("total_ram_mb", 0) > 0
-        ]
-
-        if not candidates:
-            logger.warning("OS placement: no active hypervisors — Nova will decide")
-            return {}
-
-        # Zone filter (R4.7): match zone_id against hypervisor hostname substring
-        if zone_id:
-            zone_matches = [h for h in candidates
-                            if zone_id.lower() in h["hostname"].lower()]
-            if zone_matches:
-                candidates = zone_matches
-                logger.info("OS placement: zone=%s filtered to %d hypervisor(s)",
-                            zone_id, len(candidates))
-            else:
-                logger.warning("OS placement: zone=%s matched no hypervisors — using all",
-                               zone_id)
-
-        # Virtual state per hostname — accumulates what we've assigned so far
-        vram:  Dict[str, int] = {h["hostname"]: 0 for h in candidates}
-        vcpu:  Dict[str, int] = {h["hostname"]: 0 for h in candidates}
-        batch: Dict[str, int] = {h["hostname"]: 0 for h in candidates}
-        total_vms = len(vms)
-
-        force_hosts: Dict[str, str] = {}
-
-        for vm in vms:
-            if time.time() > deadline:
-                # Graceful degradation: let Nova place remaining VMs itself
-                logger.warning(
-                    "OS placement timeout after %ds — remaining VMs placed by Nova scheduler",
-                    self._PLACEMENT_TIMEOUT,
-                )
-                break
-
-            best_host = None
-            best_score = float("inf")
-
-            for h in candidates:
-                hn = h["hostname"]
-                ram_total = h["total_ram_mb"]
-                cpu_total = h["total_vcpus"]
-
-                # Project utilisation after adding this VM (current + virtual batch)
-                ram_after = (ram_total - h["free_ram_mb"]) + vram[hn] + vm.ram_mb
-                cpu_after = (cpu_total - h["free_vcpus"]) + vcpu[hn] + vm.vcpus
-
-                # Hard RAM constraint
-                if ram_after > ram_total:
-                    continue
-
-                # Soft CPU constraint with overcommit
-                if cpu_after > cpu_total * self._CPU_OVERCOMMIT:
-                    continue
-
-                score = (
-                    self._ALPHA * (ram_after / ram_total)
-                    + self._BETA  * (cpu_after / (cpu_total * self._CPU_OVERCOMMIT))
-                    + self._GAMMA * (batch[hn] / max(total_vms, 1))
-                )
-
-                if score < best_score:
-                    best_score = score
-                    best_host = h
-
-            if best_host is None:
-                logger.warning(
-                    "OS placement: no host can fit VM %s "
-                    "(need ram=%dMB cpu=%d) — Nova will decide",
-                    vm.name, vm.ram_mb, vm.vcpus,
-                )
-                continue
-
-            hn = best_host["hostname"]
-            force_hosts[vm.name] = hn
-            vram[hn]  += vm.ram_mb
-            vcpu[hn]  += vm.vcpus
-            batch[hn] += 1
-
-            logger.info(
-                "OS placement: %s → %s  score=%.3f "
-                "(ram_util=%.0f%%, cpu_util=%.0f%%, batch_on_host=%d)",
-                vm.name, hn, best_score,
-                ((best_host["total_ram_mb"] - best_host["free_ram_mb"]) + vram[hn])
-                / best_host["total_ram_mb"] * 100,
-                ((best_host["total_vcpus"] - best_host["free_vcpus"]) + vcpu[hn])
-                / (best_host["total_vcpus"] * self._CPU_OVERCOMMIT) * 100,
-                batch[hn],
-            )
-
-        return force_hosts
+        return self.placement_engine.score_hosts_for_vms(vms, hypervisors, zone_id=zone_id)
 
     def _create_slice_openstack(self, slice_obj: Slice, vms: List[VM]) -> List[VM]:
         """
@@ -383,9 +270,15 @@ class Orchestrator:
             logger.error("Cannot fetch hypervisor stats: %s", e)
             hypervisors = []
 
-        force_hosts = self._place_vms_openstack(
+        force_hosts, place_error = self._place_vms_openstack(
             vms, hypervisors, zone_id=slice_obj.zone_id
         )
+        if place_error:
+            logger.error("OpenStack placement failed: %s", place_error)
+            slice_obj.status = SliceStatus.ERROR
+            slice_obj.error_message = place_error
+            self.db.save_slice(slice_obj)
+            return []
 
         # Per-link VLANs (R3.3/R5.1) — one distinct VLAN per topology edge,
         # mirroring the Linux driver so arping between peer VMs surfaces the
@@ -486,9 +379,11 @@ class Orchestrator:
                 except Exception as e:
                     logger.error("Cannot fetch hypervisor stats for edit: %s", e)
                     hypervisors = []
-                force_hosts = self._place_vms_openstack(
+                force_hosts, place_error = self._place_vms_openstack(
                     extra_vms, hypervisors, zone_id=slice_obj.zone_id
                 )
+                if place_error:
+                    return {"success": False, "error": place_error}
                 for vm in extra_vms:
                     vm.host_ip = None  # OpenStack VMs don't use SSH-cluster host_ip
             else:

@@ -334,6 +334,7 @@ class DatabaseManager:
         self._migrate_columns()
         self._populate_vlan_pool()
         self._seed_flavors_and_zones()
+        self._cleanup_fake_zones()
         logger.info("Database tables verified/created")
 
     def _migrate_columns(self):
@@ -976,12 +977,11 @@ class DatabaseManager:
                 logger.info("Seeded default flavors")
 
             if session.query(ZoneRecord).count() == 0:
+                # One zone == one full cluster today, matching hosts.yaml's
+                # 3-worker-per-cluster topology (server2-4 / compute1-3).
                 zones = [
-                    ("AZ-Compute-1",   "linux",      4, 24,  96),
-                    ("AZ-Compute-2",   "linux",      3, 18,  72),
-                    ("AZ-HPC",         "linux",      2, 32, 256),
+                    ("AZ-Compute-1",   "linux",      3, 24,  96),
                     ("AZ-OpenStack-1", "openstack",  3, 24,  96),
-                    ("AZ-OpenStack-2", "openstack",  3, 24,  96),
                 ]
                 for zid, cluster, servers, cpu, ram in zones:
                     session.add(ZoneRecord(
@@ -994,6 +994,42 @@ class DatabaseManager:
         except Exception as e:
             session.rollback()
             logger.warning("Seed skipped: %s", e)
+        finally:
+            session.close()
+
+    def _cleanup_fake_zones(self):
+        """
+        Remove zones invented before the zone model was aligned to
+        hosts.yaml (which has exactly 3 workers per cluster, i.e. one real
+        zone per cluster) and correct the two surviving zones' counts.
+        Runs unconditionally so already-deployed databases get fixed too,
+        not just fresh installs.
+        """
+        session = self.Session()
+        try:
+            fake_ids = ["AZ-Compute-2", "AZ-HPC", "AZ-OpenStack-2"]
+            deleted = session.query(ZoneRecord).filter(ZoneRecord.id.in_(fake_ids)).delete(
+                synchronize_session=False
+            )
+            if deleted:
+                logger.info("Removed %d fake zone(s): %s", deleted, fake_ids)
+
+            corrections = [
+                ("AZ-Compute-1", "linux", 3, 24, 96),
+                ("AZ-OpenStack-1", "openstack", 3, 24, 96),
+            ]
+            for zid, cluster, servers, cpu, ram in corrections:
+                r = session.query(ZoneRecord).filter_by(id=zid).first()
+                if r:
+                    r.cluster = cluster
+                    r.servers_count = servers
+                    r.cpu_total = cpu
+                    r.ram_total_gb = ram
+
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            logger.warning("Zone cleanup skipped: %s", e)
         finally:
             session.close()
 
@@ -1057,6 +1093,14 @@ class DatabaseManager:
         session = self.Session()
         try:
             return [r.to_dict() for r in session.query(ZoneRecord).filter_by(cluster=cluster).all()]
+        finally:
+            session.close()
+
+    def get_zone(self, zone_id: str) -> Optional[dict]:
+        session = self.Session()
+        try:
+            r = session.query(ZoneRecord).filter_by(id=zone_id).first()
+            return r.to_dict() if r else None
         finally:
             session.close()
 
