@@ -336,14 +336,20 @@ class OpenStackDriver:
 
     def create_link_network(self, name: str, vlan_id: int, project_id: str,
                             link_idx: int) -> str:
-        """Create a per-link VLAN network with a real Neutron /30 subnet,
-        matching Lab6's ring-topology pattern (192.168.1.0/30, .2.0/30, ...
-        one per link_idx). No gateway — a pure point-to-point segment, so
-        DHCP hands out both usable addresses (.1 and .2) to the two peer
-        VMs' ports. Safe to reuse the same /30 range across different
+        """Create a per-link VLAN network with a real Neutron subnet,
+        matching Lab6's ring-topology pattern (192.168.1.0/.., .2.0/.., ...
+        one per link_idx). No gateway — a pure point-to-point segment.
+        Uses a /29, not a /30: with enable_dhcp on and no gateway, a /30
+        only has 2 usable addresses (.1-.2), and Neutron's own DHCP agent
+        port consumes one of those from the same pool — leaving just 1 for
+        the two peer VMs, so the second one to boot fails with "No fixed IP
+        addresses available for network" (Nova aborts the boot outright,
+        confirmed from a live fault message). A /29 gives 6 usable
+        addresses (.1-.6), enough for the DHCP port + both VM ports with
+        room to spare. Safe to reuse the same range across different
         slices/links since each one is a separate VLAN-isolated network."""
         net_id = self.create_vlan_network(name, vlan_id, project_id)
-        cidr = f"192.168.{link_idx + 1}.0/30"
+        cidr = f"192.168.{link_idx + 1}.0/29"
         self.create_subnet(net_id, cidr, f"{name}-subnet", project_id,
                            enable_dhcp=True, disable_gateway=True)
         return net_id
