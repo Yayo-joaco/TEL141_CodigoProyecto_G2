@@ -306,8 +306,33 @@ class OpenStackDriver:
             "shared": False,
         }}
         r = requests.post(url, json=payload, headers=self._headers(), timeout=15)
+        if r.status_code == 409:
+            # The local VLAN pool (db_manager) hands this vlan_id back out
+            # as soon as a slice is released, but it has no visibility into
+            # Neutron — if an earlier deploy attempt failed after creating
+            # this network but before teardown ran (e.g. it died before a
+            # project_id was ever persisted), that network is still sitting
+            # in Neutron holding the same segmentation_id and the pool will
+            # keep recycling this id into that same conflict forever.
+            # Find and delete the orphan, then retry once.
+            self._cleanup_stale_vlan_network(vlan_id)
+            r = requests.post(url, json=payload, headers=self._headers(), timeout=15)
         r.raise_for_status()
         return r.json()["network"]["id"]
+
+    def _cleanup_stale_vlan_network(self, vlan_id: int):
+        r = requests.get(f"{self._neutron_url}/v2.0/networks",
+                         params={"provider:segmentation_id": vlan_id,
+                                 "provider:physical_network": "physnet1"},
+                         headers=self._headers(), timeout=10)
+        r.raise_for_status()
+        for net in r.json().get("networks", []):
+            logger.warning("Deleting stale leftover network %s (vlan %s) orphaned by "
+                           "a prior failed deploy", net["id"], vlan_id)
+            try:
+                self.delete_network(net["id"])
+            except Exception as e:
+                logger.error("Failed to delete stale network %s: %s", net["id"], e)
 
     def create_link_network(self, name: str, vlan_id: int, project_id: str,
                             link_idx: int) -> str:
@@ -689,33 +714,57 @@ class OpenStackDriver:
         self.assign_admin_to_project(project_id)
         logger.info("OS project created: %s for slice %s", project_id, slice_obj.id)
 
-        # One VLAN network + /30 subnet per topology link. Built once up
-        # front so peer VMs share the same network/VLAN for their shared link.
-        link_vlan_by_idx: Dict[int, int] = {}
-        for lnks in vm_link_map.values():
-            for lnk in lnks:
-                if lnk.get("vlan_id"):
-                    link_vlan_by_idx[lnk["link_idx"]] = lnk["vlan_id"]
+        # Everything from here through security-group creation can fail
+        # partway through (e.g. a Neutron 409). The caller only learns
+        # about that via a raised exception — deploy_slice never gets to
+        # return a project_id — so if we don't clean up right here, the
+        # Keystone project and any networks already created above are
+        # orphaned: invisible to teardown_slice (which needs a persisted
+        # project_id to know what to look for) and holding onto VLAN
+        # segmentation_ids that the local pool will happily hand back out
+        # to the next attempt, recreating the same conflict.
+        try:
+            # One VLAN network + /30 subnet per topology link. Built once up
+            # front so peer VMs share the same network/VLAN for their shared link.
+            link_vlan_by_idx: Dict[int, int] = {}
+            for lnks in vm_link_map.values():
+                for lnk in lnks:
+                    if lnk.get("vlan_id"):
+                        link_vlan_by_idx[lnk["link_idx"]] = lnk["vlan_id"]
 
-        link_network_by_idx: Dict[int, str] = {}
-        for link_idx, link_vlan in link_vlan_by_idx.items():
-            link_network_by_idx[link_idx] = self.create_link_network(
-                f"link-{slice_obj.id}-{link_idx}", link_vlan, project_id, link_idx
+            link_network_by_idx: Dict[int, str] = {}
+            for link_idx, link_vlan in link_vlan_by_idx.items():
+                link_network_by_idx[link_idx] = self.create_link_network(
+                    f"link-{slice_obj.id}-{link_idx}", link_vlan, project_id, link_idx
+                )
+
+            # Fallback isolated network for the edge case of a VM with no
+            # topology links and no internet (e.g. a lone 1-VM slice) — Nova
+            # still needs a NIC to boot on. Created lazily only if a VM
+            # actually needs it.
+            needs_fallback = any(
+                not vm_link_map.get(vm.name) and not vm.enable_internet for vm in vms
+            )
+            fallback_net_id = (
+                self._get_or_create_isolated_fallback_network(slice_obj, project_id)
+                if needs_fallback else None
             )
 
-        # Fallback isolated network for the edge case of a VM with no
-        # topology links and no internet (e.g. a lone 1-VM slice) — Nova
-        # still needs a NIC to boot on. Created lazily only if a VM actually
-        # needs it.
-        needs_fallback = any(
-            not vm_link_map.get(vm.name) and not vm.enable_internet for vm in vms
-        )
-        fallback_net_id = (
-            self._get_or_create_isolated_fallback_network(slice_obj, project_id)
-            if needs_fallback else None
-        )
-
-        sg_id = self.create_security_group(f"sg-{slice_obj.id}", project_id)
+            sg_id = self.create_security_group(f"sg-{slice_obj.id}", project_id)
+        except Exception:
+            logger.error("OS deploy setup failed for slice %s — cleaning up project %s "
+                        "and any networks already created to avoid orphaning them",
+                        slice_obj.id, project_id)
+            for net_id in link_network_by_idx.values():
+                try:
+                    self.delete_network(net_id)
+                except Exception as cleanup_err:
+                    logger.error("Cleanup: failed to delete network %s: %s", net_id, cleanup_err)
+            try:
+                self.delete_project(project_id)
+            except Exception as cleanup_err:
+                logger.error("Cleanup: failed to delete project %s: %s", project_id, cleanup_err)
+            raise
 
         # Resolve flavor / image
         def _boot_vm(vm):
