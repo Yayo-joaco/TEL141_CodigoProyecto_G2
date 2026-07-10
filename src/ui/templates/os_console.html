@@ -1,69 +1,95 @@
 <!DOCTYPE html>
-<html lang="es">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Consola {{ vm.name }} - PUCP Cloud Orchestrator</title>
-    <link rel="stylesheet" href="/static/style.css">
+    <title>Console — {{ vm.name }} — PUCP Cloud Orchestrator</title>
 
     <style>
-        body { margin: 0; background: #0a1620; color: #ccd6dd; }
-        .console-header {
-            background: #0d2130; border-bottom: 1px solid #2a4a5a;
-            padding: 8px 16px; display: flex; align-items: center; gap: 16px;
-            font-family: monospace; font-size: 13px;
+        :root {
+            --background: #171614;
+            --surface: #1c1b19;
+            --card: #201f1d;
+            --foreground: #f2f1ee;
+            --primary: #4f98a3;
+            --muted-foreground: #a3a099;
+            --border: rgba(255, 255, 255, 0.08);
+            --danger: #e5484d;
+            --success: #3dd68c;
+            --warning: #f5a524;
         }
-        .console-header a { color: #4db8ff; text-decoration: none; }
-        .console-header .badge { font-size: 10px; padding: 2px 8px; border-radius: 3px; }
-        .badge-active { background: #1a4d6e; color: #4db8ff; }
-        .badge-disconnected { background: #5a1a1a; color: #ff6b6b; }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0; background: var(--background); color: var(--foreground);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+        .console-header {
+            background: var(--surface); border-bottom: 1px solid var(--border);
+            padding: 10px 16px; display: flex; align-items: center; gap: 14px;
+            font-size: 13px;
+        }
+        .back-link {
+            color: var(--muted-foreground); text-decoration: none;
+            display: flex; align-items: center; gap: 6px;
+            padding: 4px 8px; border-radius: 6px; transition: background 0.15s, color 0.15s;
+        }
+        .back-link:hover { background: var(--card); color: var(--foreground); }
+        .console-header .sep { color: var(--border); }
+        .console-header .vm-name { font-weight: 600; }
+        .badge {
+            font-size: 10px; padding: 3px 9px; border-radius: 999px;
+            font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase;
+        }
+        .badge-connecting { background: rgba(245, 165, 36, 0.15); color: var(--warning); }
+        .badge-active { background: rgba(61, 214, 140, 0.15); color: var(--success); }
+        .badge-error { background: rgba(229, 72, 77, 0.15); color: var(--danger); }
+        .host-tag {
+            margin-left: auto; color: var(--muted-foreground); font-family: monospace; font-size: 12px;
+        }
         .console-wrap {
-            display: flex; flex-direction: column; height: calc(100vh - 42px);
-            align-items: center; justify-content: center;
+            display: flex; flex-direction: column; height: calc(100vh - 84px);
+            align-items: center; justify-content: center; background: var(--background);
         }
         #noVNC_screen {
-            background: #000; border: 1px solid #2a4a5a;
-            max-width: 100%; max-height: 100%;
+            background: #000; border: 1px solid var(--border); border-radius: 8px;
+            max-width: 100%; max-height: 100%; overflow: hidden;
         }
         .console-bar {
-            background: #0d2130; border-top: 1px solid #2a4a5a;
-            padding: 6px 16px; font-size: 11px; font-family: monospace;
-            display: flex; gap: 20px;
+            background: var(--surface); border-top: 1px solid var(--border);
+            padding: 8px 16px; font-size: 11px; font-family: monospace;
+            display: flex; gap: 20px; align-items: center;
         }
-        .console-bar span { color: #6a8a9a; }
-        .console-bar strong { color: #4db8ff; }
-        .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
-        .dot-connecting { background: #ffaa00; }
-        .dot-connected { background: #00cc66; }
-        .dot-error { background: #ff4444; }
+        .console-bar span.label { color: var(--muted-foreground); }
+        .console-bar strong { color: var(--primary); font-weight: 500; }
+        .status-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; }
+        .dot-connecting { background: var(--warning); }
+        .dot-connected { background: var(--success); }
+        .dot-error { background: var(--danger); }
     </style>
 </head>
 <body>
-    {% include "_navbar.html" %}
     <div class="console-header">
-        <a href="/slice/{{ vm.slice_id }}">&larr; Slice</a>
-        <span>|</span>
-        <strong>{{ vm.name }}</strong>
-        <span class="badge" id="status-badge">Conectando...</span>
-        <span style="margin-left:auto;color:#6a8a9a;">
-            OpenStack · {{ vm.hypervisor_hostname or '?' }}
-        </span>
+        <a class="back-link" href="/slices/{{ vm.slice_id }}">&larr; Back to slice</a>
+        <span class="sep">|</span>
+        <span class="vm-name">{{ vm.name }}</span>
+        <span class="badge badge-connecting" id="status-badge">Connecting</span>
+        <span class="host-tag">OpenStack · {{ vm.hypervisor_hostname or '?' }}</span>
     </div>
 
     <div class="console-wrap">
         <div id="noVNC_screen">
             <div id="noVNC_placeholder"
-                 style="padding:40px;text-align:center;color:#4db8ff;font-family:monospace;font-size:14px;">
-                Conectando via proxy al cluster OpenStack...
+                 style="padding:40px;text-align:center;color:var(--primary);font-family:monospace;font-size:14px;">
+                Connecting via proxy to the OpenStack cluster...
             </div>
         </div>
     </div>
 
     <div class="console-bar">
-        <span>VM:</span><strong>{{ vm.name }}</strong>
-        <span>Host:</span><strong>{{ vm.hypervisor_hostname or '—' }}</strong>
+        <span class="label">VM:</span><strong>{{ vm.name }}</strong>
+        <span class="label">Host:</span><strong>{{ vm.hypervisor_hostname or '—' }}</strong>
         <span id="conn-status" style="margin-left:auto;">
-            <span class="status-dot dot-connecting"></span>Conectando...
+            <span class="status-dot dot-connecting"></span>Connecting...
         </span>
     </div>
 
@@ -80,21 +106,27 @@
         function updateStatus(state, text) {
             if (state === 'connecting') {
                 connStatus.innerHTML = '<span class="status-dot dot-connecting"></span>' + text;
-                badge.textContent = 'Conectando...';
-                badge.className = 'badge badge-disconnected';
+                badge.textContent = 'Connecting';
+                badge.className = 'badge badge-connecting';
             } else if (state === 'connected') {
                 connStatus.innerHTML = '<span class="status-dot dot-connected"></span>' + text;
-                badge.textContent = 'ACTIVO';
+                badge.textContent = 'Active';
                 badge.className = 'badge badge-active';
             } else {
                 connStatus.innerHTML = '<span class="status-dot dot-error"></span>' + text;
-                badge.textContent = 'ERROR';
-                badge.className = 'badge badge-disconnected';
+                badge.textContent = 'Error';
+                badge.className = 'badge badge-error';
             }
         }
 
         function connectVNC() {
-            updateStatus('connecting', 'Conectando via proxy...');
+            if (!{{ 'true' if token else 'false' }}) {
+                updateStatus('error', 'Missing console token — reopen the console from the slice page');
+                if (placeholder) placeholder.textContent = 'Missing console token. Close this tab and click Console again.';
+                return;
+            }
+
+            updateStatus('connecting', 'Connecting via proxy...');
 
             rfb = new RFB(screenEl, wsUrl, {
                 credentials: { password: '' },
@@ -103,20 +135,20 @@
             });
 
             rfb.addEventListener('connect', function() {
-                updateStatus('connected', 'Conectado a ' + '{{ vm.name }}');
+                updateStatus('connected', 'Connected to ' + '{{ vm.name }}');
                 if (placeholder) placeholder.style.display = 'none';
                 rfb.focus();
             });
 
             rfb.addEventListener('disconnect', function(e) {
-                var msg = 'Desconectado';
+                var msg = 'Disconnected';
                 if (e.detail && e.detail.clean) {
-                    msg = 'Conexion cerrada';
+                    msg = 'Connection closed';
                 } else {
-                    msg = 'Error de conexion: ' + (e.detail ? e.detail.reason : 'timeout');
+                    msg = 'Connection error: ' + (e.detail ? e.detail.reason : 'timeout');
                 }
                 updateStatus('error', msg);
-                if (placeholder) placeholder.style.display = 'block';
+                if (placeholder) { placeholder.style.display = 'block'; placeholder.textContent = msg; }
             });
 
             rfb.addEventListener('credentialsrequired', function() {
@@ -124,7 +156,7 @@
             });
 
             rfb.addEventListener('desktopname', function(e) {
-                document.title = e.detail.name + ' - Consola';
+                document.title = e.detail.name + ' — Console';
             });
 
             rfb.viewportDrag = false;

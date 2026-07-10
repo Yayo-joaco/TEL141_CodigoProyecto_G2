@@ -1226,7 +1226,13 @@ def api_vm_console(slice_id, vm_id):
             url = os_driver.get_console_url(vm.openstack_server_id, project_id=project_id)
             if not url:
                 return jsonify({"error": "Console URL not available"}), 503
-            novnc_token = urllib.parse.parse_qs(urllib.parse.urlparse(url).query).get("token", [""])[0]
+            # Nova's console URL is e.g. "http://<novncproxy>/vnc_auto.html?path=%3Ftoken%3D<tok>" —
+            # the real token is nested inside the (URL-encoded) "path" param's own
+            # query string, not a top-level "token" param. Parsing the outer query
+            # alone always returns an empty string here.
+            outer_qs = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+            inner_path = outer_qs.get("path", [""])[0]
+            novnc_token = urllib.parse.parse_qs(urllib.parse.urlparse(inner_path).query).get("token", [""])[0]
             # window.open() is a plain browser navigation — it can't carry the
             # Authorization header the SPA normally sends, so the page-auth
             # JWT rides along as its own query param (?auth=), separate from

@@ -866,7 +866,7 @@ class OpenStackDriver:
                 ports = self.list_vm_ports(server_id, project_id)
                 net_to_port = {p.get("net_id"): p.get("port_id") for p in ports}
                 net_to_mac = {p.get("net_id"): p.get("mac_addr") for p in ports}
-                is_ubuntu = (vm.image or "").lower() == "ubuntu"
+                is_ubuntu = "ubuntu" in (vm.image or "").lower()
                 interfaces = []
                 for iface_idx, lnk in enumerate(vm_links):
                     link_net_id = link_network_by_idx.get(lnk["link_idx"])
@@ -1064,7 +1064,7 @@ class OpenStackDriver:
                 ports = self.list_vm_ports(server_id, project_id)
                 net_to_port = {p.get("net_id"): p.get("port_id") for p in ports}
                 net_to_mac = {p.get("net_id"): p.get("mac_addr") for p in ports}
-                is_ubuntu = (vm.image or "").lower() == "ubuntu"
+                is_ubuntu = "ubuntu" in (vm.image or "").lower()
                 interfaces = []
                 for iface_idx, lnk in enumerate(vm_links):
                     link_net_id = link_network_by_idx.get(lnk["link_idx"])
