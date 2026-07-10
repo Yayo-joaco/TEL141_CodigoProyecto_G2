@@ -641,11 +641,20 @@ class OpenStackDriver:
             if r.status_code != 200:
                 time.sleep(5)
                 continue
-            status = r.json()["server"]["status"]
+            server = r.json()["server"]
+            status = server["status"]
             if status == "ACTIVE":
                 return True
             if status == "ERROR":
-                logger.error("VM %s entered ERROR state", server_id)
+                # The caller's cleanup deletes this server right after we
+                # return, so the fault reason (why Nova/the hypervisor
+                # rejected the boot) must be logged now — it's the only
+                # chance to see it, since "openstack server show" on a
+                # deleted server just says "No server ... exists".
+                fault = server.get("fault", {})
+                logger.error("VM %s entered ERROR state — fault: %s (code=%s)",
+                            server_id, fault.get("message", "<no fault info>"),
+                            fault.get("code"))
                 return False
             time.sleep(5)
         logger.error("VM %s timed out waiting for ACTIVE", server_id)
