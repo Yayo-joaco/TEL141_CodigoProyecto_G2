@@ -861,13 +861,17 @@ def ws_proxy(vm_id):
 
 @app.route('/os-ws-proxy/<vm_id>')
 def os_ws_proxy(vm_id):
+    app.logger.info("OS WS Proxy ENTER: vm_id=%s", vm_id)
     wsock = request.environ.get('wsgi.websocket')
     if not wsock:
+        app.logger.error("OS WS Proxy ABORT 400: no wsgi.websocket in environ (upgrade failed)")
         abort(400, 'WebSocket requerido')
 
     orch = get_orchestrator()
     vm = orch.db.get_vm_by_id(vm_id)
     if not vm or not getattr(vm, "openstack_server_id", None):
+        app.logger.error("OS WS Proxy ABORT 404: vm_id=%s found=%s openstack_server_id=%s",
+                          vm_id, bool(vm), getattr(vm, "openstack_server_id", None) if vm else None)
         abort(404)
 
     token = request.args.get('token', '')
