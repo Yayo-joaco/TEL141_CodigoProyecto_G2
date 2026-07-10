@@ -482,9 +482,23 @@ def api_slice_vms(slice_id):
     return jsonify({"vms": [v.to_dict() for v in vms]})
 
 
+def _page_auth_ok() -> bool:
+    """The Nueva UI (React SPA) never establishes a Flask session cookie —
+    it authenticates purely via a JWT sent as ?auth=<token> (window.open
+    can't set an Authorization header). Accept either a real session
+    (old Flask templates) or a valid JWT query param."""
+    if "user_id" in session:
+        return True
+    orch = get_orchestrator()
+    token = request.args.get("auth", "")
+    ok, _user, _msg = orch.validate_request(token)
+    return ok
+
+
 @app.route("/console/<vm_id>")
-@login_required
 def console_vm(vm_id):
+    if not _page_auth_ok():
+        return redirect(url_for("login_page"))
     orch = get_orchestrator()
     vm = orch.db.get_vm_by_id(vm_id)
     if not vm:
@@ -494,8 +508,9 @@ def console_vm(vm_id):
 
 
 @app.route("/os-console/<vm_id>")
-@login_required
 def os_console_vm(vm_id):
+    if not _page_auth_ok():
+        return redirect(url_for("login_page"))
     orch = get_orchestrator()
     vm = orch.db.get_vm_by_id(vm_id)
     if not vm:
@@ -1109,6 +1124,7 @@ def api_create_slice():
         infrastructure_target=infra,
         zone_id=data.get("zone") or data.get("zone_id"),
         flavor_id=flavor_id,
+        vms_flavor=data.get("vms_flavor", {}),
     )
     return jsonify({"ticketId": ticket_id}), 202
 
@@ -1156,6 +1172,7 @@ def api_edit_slice(slice_id):
         new_vms_image=data.get("new_vms_image"),
         new_vms_internet=data.get("new_vms_internet"),
         new_vms_flavor_id=data.get("new_vms_flavor_id"),
+        new_vms_flavor=data.get("new_vms_flavor"),
         ext_topology=data.get("ext_topology"),
         anchor_vm_hint=data.get("anchor_vm_hint"),
         user=user,
@@ -1209,13 +1226,21 @@ def api_vm_console(slice_id, vm_id):
             url = os_driver.get_console_url(vm.openstack_server_id, project_id=project_id)
             if not url:
                 return jsonify({"error": "Console URL not available"}), 503
-            token = urllib.parse.parse_qs(urllib.parse.urlparse(url).query).get("token", [""])[0]
-            return jsonify({"url": f"/os-console/{vm_id}?token={token}", "type": "novnc"})
+            novnc_token = urllib.parse.parse_qs(urllib.parse.urlparse(url).query).get("token", [""])[0]
+            # window.open() is a plain browser navigation — it can't carry the
+            # Authorization header the SPA normally sends, so the page-auth
+            # JWT rides along as its own query param (?auth=), separate from
+            # novnc_token (?token=) which is Nova's own console session token.
+            auth_token = _get_token()
+            return jsonify({
+                "url": f"/os-console/{vm_id}?token={novnc_token}&auth={auth_token}",
+                "type": "novnc",
+            })
         except Exception as e:
             return jsonify({"error": str(e)}), 500
     # Linux VMs — return websockify info
     return jsonify({
-        "url": f"/console/{vm_id}",
+        "url": f"/console/{vm_id}?auth={_get_token()}",
         "ws_port": vm.vnc_ws_port,
         "type": "novnc_local",
     })

@@ -121,7 +121,8 @@ class Orchestrator:
                      vms_image: dict = None,
                      infrastructure_target: str = "linux",
                      zone_id: str = None,
-                     flavor_id: str = None) -> dict:
+                     flavor_id: str = None,
+                     vms_flavor: dict = None) -> dict:
         try:
             topo = TopologyType(topology)
         except ValueError:
@@ -169,15 +170,25 @@ class Orchestrator:
         vms = []
         vms_internet = vms_internet or []
         vms_image = vms_image or {}
+        vms_flavor = vms_flavor or {}
         for i in range(num_vms):
             vm_internet = (i + 1) in vms_internet
             vm_img = vms_image.get(str(i + 1))
+            vm_flavor_id = vms_flavor.get(str(i + 1))
+            vm_vcpus, vm_ram_mb, vm_disk_gb = vcpus, ram_mb, disk_gb
+            if vm_flavor_id:
+                vm_flavor = self.db.get_flavor(vm_flavor_id)
+                if vm_flavor:
+                    vm_vcpus = vm_flavor["vcpus"]
+                    vm_ram_mb = vm_flavor["ramMb"]
+                    vm_disk_gb = vm_flavor["diskGb"]
             vm = VM(id="", slice_id=slice_obj.id,
                     name=f"vm{i+1}", index=i,
-                    vcpus=vcpus, ram_mb=ram_mb, disk_gb=disk_gb,
+                    vcpus=vm_vcpus, ram_mb=vm_ram_mb, disk_gb=vm_disk_gb,
                     status=VMStatus.PENDING,
                     enable_internet=vm_internet,
-                    image=vm_img)
+                    image=vm_img,
+                    flavor_id=vm_flavor_id or flavor_id)
             vms.append(vm)
 
         # Linux placement (skipped for OpenStack — placement done inside _create_slice_openstack)
@@ -385,6 +396,7 @@ class Orchestrator:
                    new_vms_image: dict = None,
                    new_vms_internet: List[int] = None,
                    new_vms_flavor_id: str = None,
+                   new_vms_flavor: dict = None,
                    ext_topology: str = None,
                    anchor_vm_hint: str = None) -> dict:
         slice_obj = self.db.get_slice(slice_id)
@@ -398,6 +410,7 @@ class Orchestrator:
 
         new_vms_image = new_vms_image or {}
         new_vms_internet = new_vms_internet or []
+        new_vms_flavor = new_vms_flavor or {}
 
         # Explicit flavor choice for new VMs (same resolution pattern as
         # api_create_slice) — falls back to the per-request vcpus/ram/disk
@@ -412,15 +425,22 @@ class Orchestrator:
             current_count = len([v for v in vms if v.status != VMStatus.DELETED])
             for i in range(add_vms):
                 vm_num = current_count + i + 1
+                # Per-VM flavor override (new_vms_flavor, keyed by 1-based VM
+                # number) takes priority over the batch-wide new_vms_flavor_id.
+                vm_flavor_id = new_vms_flavor.get(str(vm_num)) or new_vms_flavor_id
+                vm_flavor = self.db.get_flavor(vm_flavor_id) if vm_flavor_id else None
+                vm_flavor_vcpus = vm_flavor["vcpus"] if vm_flavor else flavor_vcpus
+                vm_flavor_ram_mb = vm_flavor["ramMb"] if vm_flavor else flavor_ram_mb
+                vm_flavor_disk_gb = vm_flavor["diskGb"] if vm_flavor else flavor_disk_gb
                 new_vm = VM(id="", slice_id=slice_id,
                             name=f"vm{vm_num}",
                             index=current_count + i,
-                            vcpus=new_vcpus or flavor_vcpus or slice_obj.vcpus_per_vm,
-                            ram_mb=new_ram_mb or flavor_ram_mb or slice_obj.ram_mb_per_vm,
-                            disk_gb=new_disk_gb or flavor_disk_gb or slice_obj.disk_gb_per_vm,
+                            vcpus=new_vcpus or vm_flavor_vcpus or slice_obj.vcpus_per_vm,
+                            ram_mb=new_ram_mb or vm_flavor_ram_mb or slice_obj.ram_mb_per_vm,
+                            disk_gb=new_disk_gb or vm_flavor_disk_gb or slice_obj.disk_gb_per_vm,
                             image=new_vms_image.get(str(vm_num)),
                             enable_internet=(vm_num in new_vms_internet),
-                            flavor_id=new_vms_flavor_id)
+                            flavor_id=vm_flavor_id)
                 extra_vms.append(new_vm)
 
             if infra == "openstack":
@@ -835,14 +855,15 @@ class Orchestrator:
                            vms_image: dict = None,
                            infrastructure_target: str = "linux",
                            zone_id: str = None,
-                           flavor_id: str = None) -> str:
+                           flavor_id: str = None,
+                           vms_flavor: dict = None) -> str:
         return self.task_queue.enqueue(
             f"create_slice:{name}",
             self.create_slice,
             name, topology, num_vms, vcpus, ram_mb, disk_gb,
             enable_dhcp, enable_internet, created_by,
             vms_internet, vms_image,
-            infrastructure_target, zone_id, flavor_id,
+            infrastructure_target, zone_id, flavor_id, vms_flavor,
         )
 
     def delete_slice_async(self, slice_id: str, user: User = None) -> str:
@@ -859,6 +880,7 @@ class Orchestrator:
                          new_vms_image: dict = None,
                          new_vms_internet: List[int] = None,
                          new_vms_flavor_id: str = None,
+                         new_vms_flavor: dict = None,
                          ext_topology: str = None,
                          anchor_vm_hint: str = None) -> str:
         return self.task_queue.enqueue(
@@ -866,7 +888,7 @@ class Orchestrator:
             self.edit_slice,
             slice_id, add_vms, remove_vm_ids,
             new_vcpus, new_ram_mb, new_disk_gb, user,
-            new_vms_image, new_vms_internet, new_vms_flavor_id,
+            new_vms_image, new_vms_internet, new_vms_flavor_id, new_vms_flavor,
             ext_topology, anchor_vm_hint,
         )
 
