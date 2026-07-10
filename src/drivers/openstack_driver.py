@@ -614,6 +614,13 @@ class OpenStackDriver:
         scoped_token = self._get_scoped_token(project_id)
         headers = {"X-Auth-Token": scoped_token, "Content-Type": "application/json"}
         r = requests.post(url, json=payload, headers=headers, timeout=30)
+        if not r.ok:
+            # requests' default raise_for_status() message drops the response
+            # body, which is where Nova puts the actual rejection reason
+            # (e.g. bad network uuid, flavor/image mismatch) — without it a
+            # 400 here is a dead end in the logs.
+            logger.error("Nova rejected create_vm for '%s': %s %s — body: %s",
+                        name, r.status_code, r.reason, r.text[:2000])
         r.raise_for_status()
         return r.json()["server"]["id"]
 
