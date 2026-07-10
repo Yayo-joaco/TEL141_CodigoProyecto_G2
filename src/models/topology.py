@@ -20,10 +20,23 @@ class Topology:
          +-------------------------------------+
     """
 
+    # TopologyType has separate Spanish and English aliases with distinct
+    # string values (e.g. LINEAL="lineal" vs LINEAR="linear") that are NOT
+    # equal to each other as enum members — normalize here so callers can
+    # pass either without every dispatch site needing its own alias table.
+    _ALIASES = {
+        TopologyType.LINEAR: TopologyType.LINEAL,
+        TopologyType.RING: TopologyType.ANILLO,
+        TopologyType.MESH: TopologyType.MALLA,
+        TopologyType.TREE: TopologyType.ARBOL,
+    }
+
     @staticmethod
     def get_links(topology: TopologyType, num_vms: int) -> List[Tuple[int, int]]:
         if num_vms < 2:
             return []
+
+        topology = Topology._ALIASES.get(topology, topology)
 
         if topology == TopologyType.LINEAL:
             return Topology._lineal_links(num_vms)
@@ -97,6 +110,7 @@ class Topology:
 
     @staticmethod
     def get_topology_name(topology: TopologyType) -> str:
+        topology = Topology._ALIASES.get(topology, topology)
         names = {
             TopologyType.LINEAL: "Lineal",
             TopologyType.ANILLO: "Anillo",
