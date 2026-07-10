@@ -288,13 +288,28 @@ class Orchestrator:
         link_vlans = []
         for link_idx, (a, b) in enumerate(links):
             lv = self.db.assign_vlan_for_link(slice_obj.id, link_idx, cluster="openstack")
-            if lv:
-                link_vlans.append({
-                    "link_idx": link_idx,
-                    "vlan_id": lv,
-                    "vm_a_name": vm_names[a] if a < len(vm_names) else f"vm{a+1}",
-                    "vm_b_name": vm_names[b] if b < len(vm_names) else f"vm{b+1}",
-                })
+            if lv is None:
+                # A VM with no link VLAN silently boots on the slice's shared
+                # fallback network instead of its own isolated segment — that's
+                # a real R5.1 violation, not something to paper over. Fail the
+                # whole slice now with a clear reason instead of letting it
+                # surface later as an opaque Nova 400 (all links funnel into
+                # the fallback network and it's a single flat L2 for the
+                # whole slice, not the per-link isolation R3.3/R5.1 require).
+                error = (f"No hay VLANs disponibles en el pool de OpenStack para el "
+                        f"enlace {link_idx} ({vm_names[a] if a < len(vm_names) else a} <-> "
+                        f"{vm_names[b] if b < len(vm_names) else b})")
+                logger.error(error)
+                slice_obj.status = SliceStatus.ERROR
+                slice_obj.error_message = error
+                self.db.save_slice(slice_obj)
+                return []
+            link_vlans.append({
+                "link_idx": link_idx,
+                "vlan_id": lv,
+                "vm_a_name": vm_names[a] if a < len(vm_names) else f"vm{a+1}",
+                "vm_b_name": vm_names[b] if b < len(vm_names) else f"vm{b+1}",
+            })
         vm_link_map = Topology.build_vm_link_map(vms, links, link_vlans)
 
         try:
@@ -498,13 +513,19 @@ class Orchestrator:
             real_a = anchor_idx if a == 0 else len(active_vms) + a - 1
             real_b = anchor_idx if b == 0 else len(active_vms) + b - 1
             lv = self.db.assign_vlan_for_link(slice_obj.id, base_link_count + li, cluster="openstack")
-            if lv:
-                ext_link_vlans.append({
-                    "link_idx": base_link_count + li,
-                    "vlan_id": lv,
-                    "vm_a_name": all_vms_after[real_a].name if real_a < len(all_vms_after) else "",
-                    "vm_b_name": all_vms_after[real_b].name if real_b < len(all_vms_after) else "",
-                })
+            if lv is None:
+                # Same rationale as _create_slice_openstack: a missing link
+                # VLAN silently drops the new VM onto the shared fallback
+                # network instead of its own isolated segment (R3.3/R5.1).
+                return {"success": False,
+                       "error": f"No hay VLANs disponibles en el pool de OpenStack "
+                                f"para el enlace {base_link_count + li}"}
+            ext_link_vlans.append({
+                "link_idx": base_link_count + li,
+                "vlan_id": lv,
+                "vm_a_name": all_vms_after[real_a].name if real_a < len(all_vms_after) else "",
+                "vm_b_name": all_vms_after[real_b].name if real_b < len(all_vms_after) else "",
+            })
 
         ext_links_real = [
             (anchor_idx if a == 0 else len(active_vms) + a - 1,

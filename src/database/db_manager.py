@@ -389,13 +389,23 @@ class DatabaseManager:
         """Ensure VLAN pool has data: Linux (300-399) and OpenStack (400-899) ranges."""
         session = self.Session()
         try:
-            existing = {r.vlan_id for r in session.query(VLANPoolRecord).all()}
-            # Backfill cluster on any legacy rows that predate the column
-            legacy = session.query(VLANPoolRecord).filter(
-                VLANPoolRecord.cluster.is_(None)
-            ).all()
-            for r in legacy:
-                r.cluster = "openstack" if r.vlan_id in self._OPENSTACK_VLAN_RANGE else "linux"
+            all_records = session.query(VLANPoolRecord).all()
+            existing = {r.vlan_id for r in all_records}
+            # Re-derive cluster from vlan_id range on every startup rather than
+            # only backfilling NULLs. If this table predates the `cluster`
+            # column (Phase 1, Linux-only), _migrate_columns()'s
+            # `ADD COLUMN cluster ... DEFAULT 'linux'` stamps EVERY existing
+            # row with 'linux' immediately — including any 400-899 rows that
+            # already existed — so a NULL-only backfill never reaches them
+            # and the openstack pool silently stays empty forever (every
+            # assign_vlan_for_link(cluster="openstack") call returns None).
+            # The vlan_id ranges are the source of truth, so just enforce them.
+            mismatched = 0
+            for r in all_records:
+                correct = "openstack" if r.vlan_id in self._OPENSTACK_VLAN_RANGE else "linux"
+                if r.cluster != correct:
+                    r.cluster = correct
+                    mismatched += 1
             added = 0
             for vlan_id in self._LINUX_VLAN_RANGE:
                 if vlan_id not in existing:
@@ -405,9 +415,10 @@ class DatabaseManager:
                 if vlan_id not in existing:
                     session.add(VLANPoolRecord(vlan_id=vlan_id, in_use=0, cluster="openstack"))
                     added += 1
-            if added or legacy:
+            if added or mismatched:
                 session.commit()
-                logger.info("VLAN pool ensured: Linux 300-399, OpenStack 400-899 (%d added)", added)
+                logger.info("VLAN pool ensured: Linux 300-399, OpenStack 400-899 "
+                           "(%d added, %d cluster labels corrected)", added, mismatched)
         except Exception as e:
             session.rollback()
             logger.warning("VLAN pool population skipped: %s", e)

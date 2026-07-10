@@ -686,15 +686,23 @@ class OpenStackDriver:
     def _get_or_create_isolated_fallback_network(self, slice_obj, project_id: str) -> str:
         """A VM with no topology links and no internet still needs a NIC to
         boot Nova on. Reuses the slice's own VLAN (already assigned per-slice
-        for isolation/OVS2-pruning bookkeeping) as a pure L2 network with no
-        subnet — no address is ever expected on it. Idempotent: reuses the
+        for isolation/OVS2-pruning bookkeeping). Nova refuses to boot an
+        instance on a network with no subnet at all ("requires a subnet in
+        order to boot instances on"), so — unlike the link networks — this
+        one can't skip the subnet; it gets a private /29 nobody is expected
+        to actually address (no router, no DHCP relay to anywhere). Safe to
+        reuse the same CIDR across slices for the same reason link /30s are:
+        each is its own VLAN-isolated network. Idempotent: reuses the
         network if a previous boot in this slice already created it."""
         existing = self.list_networks_for_project(project_id)
         name = f"net-{slice_obj.id}"
         for net in existing:
             if net.get("name") == name:
                 return net["id"]
-        return self.create_vlan_network(name, slice_obj.vlan_id or 100, project_id)
+        net_id = self.create_vlan_network(name, slice_obj.vlan_id or 100, project_id)
+        self.create_subnet(net_id, "192.168.100.0/29", f"{name}-subnet", project_id,
+                           enable_dhcp=True, disable_gateway=True)
+        return net_id
 
     def deploy_slice(self, slice_obj, vms, force_hosts: Dict[str, str] = None,
                      vm_link_map: Dict[str, List[dict]] = None) -> dict:
