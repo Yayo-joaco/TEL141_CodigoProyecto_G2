@@ -491,8 +491,14 @@ class OpenStackDriver:
         return r.json().get("networks", [])
 
     def list_servers_for_project(self, project_id: str) -> List[dict]:
+        """Uses the admin token with all_tenants/project_id filters, not a
+        token scoped to project_id — scoping a token requires the project to
+        still exist in Keystone, which breaks teardown retries after a
+        Keystone project delete has already gone through while Nova/Neutron
+        cleanup was still incomplete (a real sequence teardown_slice can hit)."""
         r = requests.get(f"{self._nova_url}/v2.1/servers/detail",
-                         headers=self._headers(project_id), timeout=10)
+                         params={"all_tenants": 1, "project_id": project_id},
+                         headers=self._headers(), timeout=10)
         r.raise_for_status()
         return r.json().get("servers", [])
 
@@ -663,12 +669,32 @@ class OpenStackDriver:
         return None
 
     def delete_vm(self, server_id: str, project_id: str):
+        """Uses the admin token (not one scoped to project_id) — teardown can
+        be retried after the Keystone project itself has already been
+        deleted while Nova/Neutron cleanup was still incomplete, and scoping
+        a token to a project_id that no longer exists is a hard 401."""
         url = f"{self._nova_url}/v2.1/servers/{server_id}"
-        scoped_token = self._get_scoped_token(project_id)
-        headers = {"X-Auth-Token": scoped_token, "Content-Type": "application/json"}
-        r = requests.delete(url, headers=headers, timeout=15)
+        r = requests.delete(url, headers=self._headers(), timeout=15)
         if r.status_code not in (204, 404):
             r.raise_for_status()
+
+    def wait_for_vm_deleted(self, server_id: str, project_id: str, timeout: int = 60) -> bool:
+        """Nova's DELETE returns as soon as the request is accepted — the
+        compute manager releases the instance's ports asynchronously after
+        that. Neutron rejects network/security-group deletion with a 409
+        while a port is still attached, so callers that delete VMs then
+        immediately delete their networks must wait for the server to
+        actually disappear first, not just for the DELETE call to return."""
+        url = f"{self._nova_url}/v2.1/servers/{server_id}"
+        headers = self._headers()
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            r = requests.get(url, headers=headers, timeout=10)
+            if r.status_code == 404:
+                return True
+            time.sleep(3)
+        logger.error("VM %s did not disappear from Nova within %ss of delete", server_id, timeout)
+        return False
 
     def get_console_url(self, server_id: str, project_id: str = None) -> Optional[str]:
         url = f"{self._nova_url}/v2.1/servers/{server_id}/action"
@@ -1142,6 +1168,12 @@ class OpenStackDriver:
             except Exception as e:
                 logger.error("Delete VM %s: %s", sid, e)
                 ok = False
+        # Wait for the deletes to actually land in Nova before touching
+        # networks/security groups below — Neutron 409s on any port still
+        # attached to a server that Nova hasn't finished releasing yet.
+        for sid in server_ids:
+            if not self.wait_for_vm_deleted(sid, project_id):
+                ok = False
 
         # Routers — must be cleared of interfaces (handled inside
         # delete_router) and gateway before Neutron allows deletion.
@@ -1196,7 +1228,19 @@ class OpenStackDriver:
                 ok = False
 
         # Project last — Keystone will refuse (or silently leave orphans)
-        # if any of the above are still attached.
+        # if any of the above are still attached. If an earlier step failed
+        # (e.g. a network 409), deleting the project anyway would orphan
+        # whatever's left: Keystone happily deletes a project with resources
+        # still scoped to it, and every remaining resource then becomes
+        # unreachable (no token can be scoped to a project_id that no
+        # longer resolves), exactly what turned this into a manual-cleanup
+        # situation last time. Leave the project alive so a retry of this
+        # same method can still get scoped tokens and finish the job.
+        if not ok:
+            logger.error("Skipping project %s deletion — earlier cleanup step(s) failed; "
+                        "retry teardown_slice to finish before deleting the project", project_id)
+            return ok
+
         try:
             self.delete_project(project_id)
         except Exception as e:
