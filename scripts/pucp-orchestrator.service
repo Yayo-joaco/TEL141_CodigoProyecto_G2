@@ -8,7 +8,8 @@ Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/pucp-cloud-orchestrator
 ExecStartPre=/bin/mkdir -p /home/ubuntu/pucp-cloud-orchestrator/logs
-ExecStart=/home/ubuntu/pucp-cloud-orchestrator/venv/bin/python3 -m src.ui.app
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/pucp-cloud-orchestrator/venv/bin/python3 -u -m src.ui.app
 Restart=on-failure
 RestartSec=5
 StandardOutput=append:/home/ubuntu/pucp-cloud-orchestrator/logs/orchestrator.log
