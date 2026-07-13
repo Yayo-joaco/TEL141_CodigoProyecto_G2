@@ -12,6 +12,19 @@ import requests
 
 logger = logging.getLogger("orchestrator.openstack")
 
+# Cloud images (e.g. Ubuntu cloud images) boot with no password set and
+# SSH-key-only login by default — the console then has no working
+# credentials. Mirrors LinuxDriver's `virt-customize --password ubuntu:...`
+# offline step, but via cloud-init since OpenStack images aren't customized
+# ahead of boot. Cirros has no cloud-init and simply ignores unknown
+# user_data, so this is safe to send unconditionally.
+DEFAULT_CLOUD_INIT_USERDATA = """#cloud-config
+password: ubuntu
+chpasswd:
+  expire: false
+ssh_pwauth: true
+"""
+
 
 class OpenStackDriver:
     """
@@ -852,6 +865,7 @@ class OpenStackDriver:
                 project_id=project_id,
                 force_host=host,
                 security_group_ids=[f"sg-{slice_obj.id}"],
+                userdata=DEFAULT_CLOUD_INIT_USERDATA,
             )
             try:
                 ok = self.wait_for_active(server_id, project_id)
@@ -1052,6 +1066,7 @@ class OpenStackDriver:
                 project_id=project_id,
                 force_host=host,
                 security_group_ids=[f"sg-{slice_obj.id}"],
+                userdata=DEFAULT_CLOUD_INIT_USERDATA,
             )
             try:
                 ok = self.wait_for_active(server_id, project_id)
