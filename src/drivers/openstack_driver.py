@@ -29,8 +29,6 @@ DEFAULT_CLOUD_INIT_USERDATA = """#cloud-config
 ssh_pwauth: true
 chpasswd:
   expire: false
-  list: |
-    ubuntu:ubuntu
 users:
   - default
   - name: ubuntu
