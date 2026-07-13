@@ -380,7 +380,39 @@ class OpenStackDriver:
         cidr = f"192.168.{link_idx + 1}.0/29"
         self.create_subnet(net_id, cidr, f"{name}-subnet", project_id,
                            enable_dhcp=True, disable_gateway=True)
+        self._ensure_dhcp_agent(net_id)
         return net_id
+
+    def _ensure_dhcp_agent(self, network_id: str):
+        """A subnet with enable_dhcp=True only actually leases addresses once
+        some DHCP agent is scheduled onto its network — Neutron's automatic
+        scheduler doesn't reliably pick up every newly-created VLAN network in
+        this deployment (confirmed live: link networks' subnets show
+        enable_dhcp=True in Neutron, but guest NICs on them never receive a
+        lease, while manually-scheduled networks like "external" work fine).
+        Explicitly binds the network to an active DHCP agent right after
+        creating its subnet. Best-effort: swallow failures (e.g. network
+        already scheduled returns a 409) so a slow/absent DHCP agent never
+        blocks VM boot — the VM still gets a Neutron port either way, it
+        would just lack a lease until this is fixed."""
+        try:
+            r = requests.get(f"{self._neutron_url}/v2.0/agents",
+                             params={"agent_type": "DHCP agent", "alive": True},
+                             headers=self._headers(), timeout=10)
+            r.raise_for_status()
+            agents = r.json().get("agents", [])
+            if not agents:
+                logger.warning("No alive DHCP agent found to schedule network %s onto", network_id)
+                return
+            agent_id = agents[0]["id"]
+            ar = requests.post(
+                f"{self._neutron_url}/v2.0/agents/{agent_id}/dhcp-networks",
+                json={"network_id": network_id}, headers=self._headers(), timeout=10)
+            if ar.status_code not in (201, 409):
+                logger.warning("DHCP agent scheduling for network %s returned %s: %s",
+                               network_id, ar.status_code, ar.text)
+        except Exception as e:
+            logger.warning("Failed to schedule DHCP agent for network %s: %s", network_id, e)
 
     def create_port(self, network_id: str, project_id: str,
                     name: str = None) -> str:
@@ -902,6 +934,10 @@ class OpenStackDriver:
                 ports = self.list_vm_ports(server_id, project_id)
                 net_to_port = {p.get("net_id"): p.get("port_id") for p in ports}
                 net_to_mac = {p.get("net_id"): p.get("mac_addr") for p in ports}
+                net_to_ip = {
+                    p.get("net_id"): p["fixed_ips"][0]["ip_address"]
+                    for p in ports if p.get("fixed_ips")
+                }
                 is_ubuntu = "ubuntu" in (vm.image or "").lower()
                 interfaces = []
                 for iface_idx, lnk in enumerate(vm_links):
@@ -911,6 +947,7 @@ class OpenStackDriver:
                         "network_id": link_net_id,
                         "port_id": net_to_port.get(link_net_id) if link_net_id else None,
                         "mac_addr": net_to_mac.get(link_net_id) if link_net_id else None,
+                        "ip_addr": net_to_ip.get(link_net_id) if link_net_id else None,
                         "iface_name": f"ens{iface_idx + 3}" if is_ubuntu else f"eth{iface_idx}",
                         "vlan_id": lnk.get("vlan_id"),
                         "link_idx": lnk["link_idx"],
@@ -922,6 +959,7 @@ class OpenStackDriver:
                         "network_id": ext_net_id_for_vm,
                         "port_id": net_to_port.get(ext_net_id_for_vm),
                         "mac_addr": net_to_mac.get(ext_net_id_for_vm),
+                        "ip_addr": net_to_ip.get(ext_net_id_for_vm) or ext_ip,
                         "iface_name": f"ens{len(vm_links) + 3}" if is_ubuntu else f"eth{len(vm_links)}",
                         "vlan_id": None,
                         "link_idx": None,
@@ -1101,6 +1139,10 @@ class OpenStackDriver:
                 ports = self.list_vm_ports(server_id, project_id)
                 net_to_port = {p.get("net_id"): p.get("port_id") for p in ports}
                 net_to_mac = {p.get("net_id"): p.get("mac_addr") for p in ports}
+                net_to_ip = {
+                    p.get("net_id"): p["fixed_ips"][0]["ip_address"]
+                    for p in ports if p.get("fixed_ips")
+                }
                 is_ubuntu = "ubuntu" in (vm.image or "").lower()
                 interfaces = []
                 for iface_idx, lnk in enumerate(vm_links):
@@ -1110,6 +1152,7 @@ class OpenStackDriver:
                         "network_id": link_net_id,
                         "port_id": net_to_port.get(link_net_id) if link_net_id else None,
                         "mac_addr": net_to_mac.get(link_net_id) if link_net_id else None,
+                        "ip_addr": net_to_ip.get(link_net_id) if link_net_id else None,
                         "iface_name": f"ens{iface_idx + 3}" if is_ubuntu else f"eth{iface_idx}",
                         "vlan_id": lnk.get("vlan_id"),
                         "link_idx": lnk["link_idx"],
@@ -1121,6 +1164,7 @@ class OpenStackDriver:
                         "network_id": ext_net_id_for_vm,
                         "port_id": net_to_port.get(ext_net_id_for_vm),
                         "mac_addr": net_to_mac.get(ext_net_id_for_vm),
+                        "ip_addr": net_to_ip.get(ext_net_id_for_vm) or ext_ip,
                         "iface_name": f"ens{len(vm_links) + 3}" if is_ubuntu else f"eth{len(vm_links)}",
                         "vlan_id": None,
                         "link_idx": None,

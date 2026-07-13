@@ -797,6 +797,15 @@ def ws_proxy(vm_id):
             sub_list = ['binary', 'base64']
         remote = ws_client.create_connection(
             target_url, timeout=10, subprotocols=sub_list)
+        # create_connection's timeout also becomes the socket's permanent
+        # recv() timeout (websocket-client applies it via settimeout() and
+        # never resets it after the handshake). A VNC session sits idle
+        # between keystrokes/framebuffer updates far longer than 10s, so
+        # remote.recv() below was raising a timeout mid-session and the
+        # proxy would tear down the connection — looked like a random
+        # disconnect, was actually this fixed 10s read deadline. Clear it
+        # once connected so only the initial handshake is time-bounded.
+        remote.sock.settimeout(None)
     except Exception as e:
         app.logger.error("WS Proxy cannot reach worker %s: %s", target_url, e)
         try:
@@ -886,6 +895,10 @@ def os_ws_proxy(vm_id):
             sub_list = ['binary', 'base64']
         remote = ws_client.create_connection(
             target_url, timeout=10, subprotocols=sub_list)
+        # See the identical fix/comment in ws_proxy() above — create_connection's
+        # timeout sticks as the socket's recv() timeout for the whole session,
+        # not just the handshake, and was tearing down idle VNC sessions.
+        remote.sock.settimeout(None)
     except Exception as e:
         app.logger.error("OS WS Proxy cannot reach novncproxy %s: %s", target_url, e)
         try:
