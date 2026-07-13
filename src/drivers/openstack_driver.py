@@ -635,6 +635,13 @@ class OpenStackDriver:
         if userdata:
             import base64
             server["user_data"] = base64.b64encode(userdata.encode()).decode()
+            # This topology gives each VM only point-to-point /30 link NICs
+            # (no per-slice Neutron router), so cloud-init can never reach
+            # the metadata service at 169.254.169.169 over the network to
+            # fetch user_data. config_drive makes Nova write user_data to a
+            # virtual CD-ROM attached to the VM instead — cloud-init reads
+            # it from there with no network required.
+            server["config_drive"] = True
         payload = {"server": server}
         scoped_token = self._get_scoped_token(project_id)
         headers = {"X-Auth-Token": scoped_token, "Content-Type": "application/json"}
