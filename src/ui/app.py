@@ -1941,8 +1941,32 @@ def spa_fallback(path):
 # Run
 # =============================================================
 
+class DebugWebSocketHandler(WebSocketHandler):
+    """
+    WebSocketHandler.run_application() has no try/except around the
+    post-upgrade dispatch to the WSGI app — any exception raised between
+    the 101 response and the Flask view running should normally propagate
+    to gevent's own error logging. We're seeing zero log output (not even
+    a traceback) for real WS-upgrade requests to /os-ws-proxy, which means
+    something is failing silently before reaching that point. This wrapper
+    force-logs any exception with a full traceback so it can't be lost.
+    """
+    def run_application(self):
+        import traceback
+        try:
+            self.logger.error("DBG run_application ENTER: path=%s", self.environ.get('PATH_INFO'))
+            result = super(DebugWebSocketHandler, self).run_application()
+            self.logger.error("DBG run_application RETURNED normally: path=%s has_ws=%s",
+                               self.environ.get('PATH_INFO'), hasattr(self, 'websocket'))
+            return result
+        except Exception:
+            self.logger.error("DBG run_application EXCEPTION for path=%s:\n%s",
+                               self.environ.get('PATH_INFO'), traceback.format_exc())
+            raise
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("TEL141_UI_PORT", "8080"))
-    http_server = WSGIServer(('0.0.0.0', port), app, handler_class=WebSocketHandler)
+    http_server = WSGIServer(('0.0.0.0', port), app, handler_class=DebugWebSocketHandler)
     print(f"PUCP Cloud Orchestrator running on http://0.0.0.0:{port}")
     http_server.serve_forever()
