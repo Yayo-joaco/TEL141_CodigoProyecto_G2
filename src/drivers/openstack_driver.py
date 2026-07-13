@@ -19,21 +19,25 @@ logger = logging.getLogger("orchestrator.openstack")
 # ahead of boot. Cirros has no cloud-init and simply ignores unknown
 # user_data, so this is safe to send unconditionally.
 #
-# Ubuntu cloud images create the default "ubuntu" user with lock_passwd:
-# true — setting a password via the top-level `password:` key alone does
-# NOT unlock it on every cloud-init version, so console login still fails
-# with "Login incorrect" even though the password was applied. Explicitly
-# setting lock_passwd: false on the user (plus ssh_pwauth for good measure)
-# is what actually re-enables password login.
+# IMPORTANT: do NOT try to set the password via `users: [- default, - name:
+# ubuntu, plain_text_passwd: ..., lock_passwd: false]`. That looks correct
+# per cloud-init's docs, but is a documented cloud-init bug (canonical/
+# cloud-init#6703): the `default` entry creates the "ubuntu" user first
+# with lock_passwd=True, and when the second `name: ubuntu` entry is then
+# merged into the *existing* user, its password/lock_passwd overrides are
+# silently dropped — /etc/shadow keeps the leading "!" (locked) no matter
+# what plain_text_passwd says, so console login keeps failing with no
+# error anywhere. The `chpasswd` module (used alone, without touching
+# `users`) is the one path that reliably sets AND unlocks the password on
+# the pre-existing default user.
 DEFAULT_CLOUD_INIT_USERDATA = """#cloud-config
 ssh_pwauth: true
 chpasswd:
   expire: false
-users:
-  - default
-  - name: ubuntu
-    lock_passwd: false
-    plain_text_passwd: ubuntu
+  users:
+    - name: ubuntu
+      password: ubuntu
+      type: text
 """
 
 
