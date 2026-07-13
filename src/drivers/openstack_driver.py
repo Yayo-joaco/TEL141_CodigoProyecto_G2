@@ -18,11 +18,24 @@ logger = logging.getLogger("orchestrator.openstack")
 # offline step, but via cloud-init since OpenStack images aren't customized
 # ahead of boot. Cirros has no cloud-init and simply ignores unknown
 # user_data, so this is safe to send unconditionally.
+#
+# Ubuntu cloud images create the default "ubuntu" user with lock_passwd:
+# true — setting a password via the top-level `password:` key alone does
+# NOT unlock it on every cloud-init version, so console login still fails
+# with "Login incorrect" even though the password was applied. Explicitly
+# setting lock_passwd: false on the user (plus ssh_pwauth for good measure)
+# is what actually re-enables password login.
 DEFAULT_CLOUD_INIT_USERDATA = """#cloud-config
-password: ubuntu
+ssh_pwauth: true
 chpasswd:
   expire: false
-ssh_pwauth: true
+  list: |
+    ubuntu:ubuntu
+users:
+  - default
+  - name: ubuntu
+    lock_passwd: false
+    plain_text_passwd: ubuntu
 """
 
 
