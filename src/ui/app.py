@@ -5,6 +5,7 @@
 import json
 import logging
 import os
+import socket
 import sys
 import urllib.parse
 import uuid
@@ -774,6 +775,24 @@ def admin_sessions():
 # WebSocket Proxy for VNC Console
 # =============================================================
 
+def _disable_nagle(sock):
+    # RFB's incremental-update flow is a request/reply ping-pong of small
+    # packets (FramebufferUpdateRequest <-> FramebufferUpdate, keystrokes).
+    # Nagle's algorithm (on by default) coalesces small writes and waits for
+    # an ACK before sending the next one, which on a relayed connection like
+    # this (browser -> Flask -> worker/novncproxy, two independent TCP
+    # sockets instead of one direct hop) can stall each leg for hundreds of
+    # ms to seconds without ever erroring — output looks "frozen" until the
+    # session times out and a fresh connection forces a full (non-
+    # incremental) framebuffer redraw, which is what made it look like the
+    # data only "arrived" on reconnect. Disabling Nagle on both legs makes
+    # every write go out immediately.
+    try:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except Exception:
+        pass
+
+
 @app.route('/ws-proxy/<vm_id>', websocket=True)
 def ws_proxy(vm_id):
     wsock = request.environ.get('wsgi.websocket')
@@ -806,6 +825,8 @@ def ws_proxy(vm_id):
         # disconnect, was actually this fixed 10s read deadline. Clear it
         # once connected so only the initial handshake is time-bounded.
         remote.sock.settimeout(None)
+        _disable_nagle(remote.sock)
+        _disable_nagle(wsock.handler.socket)
     except Exception as e:
         app.logger.error("WS Proxy cannot reach worker %s: %s", target_url, e)
         try:
@@ -899,6 +920,8 @@ def os_ws_proxy(vm_id):
         # timeout sticks as the socket's recv() timeout for the whole session,
         # not just the handshake, and was tearing down idle VNC sessions.
         remote.sock.settimeout(None)
+        _disable_nagle(remote.sock)
+        _disable_nagle(wsock.handler.socket)
     except Exception as e:
         app.logger.error("OS WS Proxy cannot reach novncproxy %s: %s", target_url, e)
         try:

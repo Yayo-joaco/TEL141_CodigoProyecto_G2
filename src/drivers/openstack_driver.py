@@ -38,7 +38,50 @@ chpasswd:
     - name: ubuntu
       password: ubuntu
       type: text
+runcmd:
+  - |
+    for i in $(ls /sys/class/net); do
+      [ "$i" = "lo" ] && continue
+      ip link set "$i" up 2>/dev/null
+      ip -4 addr show dev "$i" | grep -q "inet " && continue
+      dhclient "$i" 2>/dev/null || (command -v dhcpcd >/dev/null 2>&1 && dhcpcd "$i") || true
+    done
 """
+
+# Cloud images (Ubuntu et al.) are supposed to auto-configure every attached
+# NIC via cloud-init's network datasource — fed here through config_drive
+# since there's no per-slice router for the 169.254.169.169 metadata path
+# (see the config_drive comment in create_vm). In practice that path has
+# been observed live to leave secondary NICs (anything past the first)
+# without a DHCP lease even though Neutron correctly reserved/assigned one
+# on its side — the guest simply never asks. The `runcmd` block above forces
+# every non-loopback interface up and DHCP'd explicitly rather than trusting
+# either image's default per-NIC bring-up behavior.
+#
+# CirrOS is a special case: it has no real cloud-init, only the minimal
+# cirros-init, which (a) ignores #cloud-config YAML entirely (confirmed:
+# it silently no-ops on unknown user_data — that's why the password-set
+# block above never applies to CirrOS) and (b) even for its own boot
+# process, only ever DHCPs eth0 automatically — every other interface
+# needs an explicit `cirros-dhcpc up ethN`. cirros-init *does* support a
+# raw `#!`-prefixed shell script as user_data, so CirrOS VMs need a
+# completely different (non-YAML) user_data payload — see
+# _userdata_for_image() below, selected per-VM in _boot_vm by image name.
+CIRROS_USERDATA_TEMPLATE = """#!/bin/sh
+for i in $(seq 0 {max_iface}); do
+  sudo /sbin/cirros-dhcpc up eth$i 2>/dev/null
+done
+"""
+
+
+def _userdata_for_image(image_name: str, num_ifaces: int) -> str:
+    """Pick the right user_data payload/format for the image being booted,
+    and make sure it forces DHCP on every NIC the VM will actually have
+    (num_ifaces link/internet NICs) rather than just the first."""
+    if "cirros" in (image_name or "").lower():
+        max_iface = max(num_ifaces - 1, 0)
+        return CIRROS_USERDATA_TEMPLATE.format(max_iface=max_iface)
+    return DEFAULT_CLOUD_INIT_USERDATA
 
 
 class OpenStackDriver:
@@ -919,7 +962,7 @@ class OpenStackDriver:
                 project_id=project_id,
                 force_host=host,
                 security_group_ids=[f"sg-{slice_obj.id}"],
-                userdata=DEFAULT_CLOUD_INIT_USERDATA,
+                userdata=_userdata_for_image(image_name, len(network_ids)),
             )
             try:
                 ok = self.wait_for_active(server_id, project_id)
@@ -1126,7 +1169,7 @@ class OpenStackDriver:
                 project_id=project_id,
                 force_host=host,
                 security_group_ids=[f"sg-{slice_obj.id}"],
-                userdata=DEFAULT_CLOUD_INIT_USERDATA,
+                userdata=_userdata_for_image(image_name, len(network_ids)),
             )
             try:
                 ok = self.wait_for_active(server_id, project_id)
